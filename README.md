@@ -17,3 +17,4 @@ If you are developing a production application, we recommend using TypeScript wi
 "# projeck-jualan" 
 "# projeck-jualan" 
 "# web-penjualan" 
+"# web-penjualan" 
