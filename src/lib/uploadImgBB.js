@@ -13,12 +13,12 @@ export const uploadToImgBB = async (file) => {
   const IMGBB_API_KEY = "26a7f624e16111128fa94b310b9a9c79";
 
   try {
-    // 1. Opsi Kompresi Gambar (Sama seperti sebelumnya agar upload lebih cepat)
+    // 1. Opsi Kompresi Gambar
     const options = {
-      maxSizeMB: 0.2, // Maksimal 200KB
-      maxWidthOrHeight: 1024,
+      maxSizeMB: 0.5,
+      maxWidthOrHeight: 1920,
       useWebWorker: true,
-      fileType: 'image/webp'
+      // Tidak memaksa konversi format — JPEG tetap JPEG, PNG tetap PNG
     };
 
     // 2. Kompres File

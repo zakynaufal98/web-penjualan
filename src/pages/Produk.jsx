@@ -1,24 +1,23 @@
 import { useState, useEffect } from 'react';
-import { Search, Plus, MoreVertical, AlertTriangle, X, Loader2, AlertCircle } from 'lucide-react';
+import { Search, Plus, AlertTriangle, X, Loader2, AlertCircle, Edit2, Trash2, ImageIcon, Upload } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { uploadProductImage } from '../lib/uploadImage';
+import Toast from '../components/ui/Toast';
 
 export default function Produk() {
   const [searchTerm, setSearchTerm] = useState('');
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState(null);
 
-  // Form State
   const [formData, setFormData] = useState({
-    name: '',
-    category: '',
-    cost_price: 0,
-    selling_price: 0,
-    stock: 0,
-    image_url: ''
+    name: '', category: '', selling_price: 0, stock: 0, image_url: ''
   });
   const [formLoading, setFormLoading] = useState(false);
+  const [imageUploading, setImageUploading] = useState(false);
   const [error, setError] = useState('');
+  const [toast, setToast] = useState({ message: '', type: 'success' });
 
   useEffect(() => {
     fetchProducts();
@@ -39,35 +38,83 @@ export default function Produk() {
     setLoading(false);
   };
 
-  const handleAdd = async (e) => {
+  const openAdd = () => {
+    setEditingProduct(null);
+    setFormData({ name: '', category: '', selling_price: 0, stock: 0, image_url: '' });
+    setError('');
+    setIsModalOpen(true);
+  };
+
+  const openEdit = (product) => {
+    setEditingProduct(product);
+    setFormData({
+      name: product.name,
+      category: product.category,
+      selling_price: product.selling_price,
+      stock: product.stock,
+      image_url: product.image_url || ''
+    });
+    setError('');
+    setIsModalOpen(true);
+  };
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImageUploading(true);
+    try {
+      const url = await uploadProductImage(file);
+      setFormData(prev => ({ ...prev, image_url: url }));
+    } catch {
+      setError('Gagal upload gambar. Coba lagi.');
+    }
+    setImageUploading(false);
+  };
+
+  const handleSave = async (e) => {
     e.preventDefault();
     setFormLoading(true);
     setError('');
 
-    if (!formData.name || !formData.category || formData.cost_price < 0 || formData.selling_price < 0) {
+    if (!formData.name || !formData.category || formData.selling_price < 0) {
       setError('Mohon lengkapi form dengan benar');
       setFormLoading(false);
       return;
     }
 
-    const { data, error: insertError } = await supabase.from('products').insert([{
+    const payload = {
       name: formData.name,
       category: formData.category,
-      cost_price: formData.cost_price,
       selling_price: formData.selling_price,
       stock: formData.stock,
       image_url: formData.image_url || 'https://images.unsplash.com/photo-1558961363-fa8fdf82db35?w=500&q=80',
-      is_available: true
-    }]);
+      ...(!editingProduct && { cost_price: 0 }),
+    };
 
-    if (insertError) {
-      setError(insertError.message);
+    const { error: dbError } = editingProduct
+      ? await supabase.from('products').update(payload).eq('id', editingProduct.id)
+      : await supabase.from('products').insert([{ ...payload, is_available: true }]);
+
+    if (dbError) {
+      setError(dbError.message);
     } else {
       setIsModalOpen(false);
-      setFormData({ name: '', category: '', cost_price: 0, selling_price: 0, stock: 0, image_url: '' });
-      fetchProducts(); // Refresh
+      setToast({ message: editingProduct ? 'Produk berhasil diperbarui!' : 'Produk berhasil ditambahkan!', type: 'success' });
+      fetchProducts();
     }
     setFormLoading(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (confirm('Yakin ingin menghapus produk ini?')) {
+      const { error: delError } = await supabase.from('products').delete().eq('id', id);
+      if (delError) {
+        setToast({ message: 'Gagal menghapus produk.', type: 'error' });
+      } else {
+        setToast({ message: 'Produk berhasil dihapus.', type: 'success' });
+        fetchProducts();
+      }
+    }
   };
 
   return (
@@ -77,8 +124,8 @@ export default function Produk() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-50">Manajemen Produk</h1>
           <p className="text-gray-500 dark:text-gray-400 mt-1 text-sm sm:text-base">Kelola menu dan stok kue Anda.</p>
         </div>
-        <button 
-          onClick={() => setIsModalOpen(true)}
+        <button
+          onClick={openAdd}
           className="w-full sm:w-auto flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors shadow-sm shadow-primary-600/20"
         >
           <Plus size={18} />
@@ -107,12 +154,24 @@ export default function Produk() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
           {products.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase())).map((product) => (
             <div key={product.id} className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden group hover:shadow-md transition-shadow">
-              <div className="relative h-48 overflow-hidden">
-                <img 
-                  src={product.image_url} 
-                  alt={product.name} 
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                />
+              <div className="relative h-48 overflow-hidden bg-gray-100 dark:bg-gray-800">
+                {(() => {
+                  const isImgBB = product.image_url?.includes('ibb.co') || product.image_url?.includes('imgbb.com');
+                  const validUrl = product.image_url && !isImgBB ? product.image_url : null;
+                  return validUrl ? (
+                    <img
+                      src={validUrl}
+                      alt={product.name}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                      onError={(e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                    />
+                  ) : (
+                    <div className="flex w-full h-full items-center justify-center flex-col gap-2 text-gray-300 dark:text-gray-600">
+                      <ImageIcon size={36} />
+                      <span className="text-xs">{isImgBB ? 'Foto perlu diupload ulang' : 'Belum ada gambar'}</span>
+                    </div>
+                  );
+                })()}
                 <div className="absolute top-3 right-3">
                   <span className={`px-2.5 py-1 rounded-full text-xs font-medium shadow-sm backdrop-blur-md
                     ${product.stock > 10 ? 'bg-emerald-100/90 text-emerald-700' : 
@@ -127,9 +186,14 @@ export default function Produk() {
                     <h3 className="font-bold text-gray-900 dark:text-gray-100">{product.name}</h3>
                     <p className="text-xs text-gray-500">{product.category}</p>
                   </div>
-                  <button className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-800 transition-colors">
-                    <MoreVertical size={18} />
-                  </button>
+                  <div className="flex gap-1">
+                    <button onClick={() => openEdit(product)} className="p-1.5 rounded-lg text-gray-400 hover:text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/20 transition-colors">
+                      <Edit2 size={15} />
+                    </button>
+                    <button onClick={() => handleDelete(product.id)} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
                 </div>
                 
                 <div className="mt-4 space-y-2">
@@ -157,18 +221,20 @@ export default function Produk() {
         </div>
       )}
 
+      <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
+
       {/* Modal Tambah Produk */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-start justify-center p-4 sm:p-6 bg-black/50 backdrop-blur-sm overflow-y-auto">
           <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 w-full max-w-md my-8 sm:my-auto h-fit">
             <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800 sticky top-0 bg-white dark:bg-gray-900 rounded-t-2xl z-10">
-              <h2 className="text-lg font-bold text-gray-900 dark:text-white">Tambah Produk Kue</h2>
+              <h2 className="text-lg font-bold text-gray-900 dark:text-white">{editingProduct ? 'Edit Produk' : 'Tambah Produk Kue'}</h2>
               <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
                 <X size={20} />
               </button>
             </div>
             
-            <form onSubmit={handleAdd} className="p-4 space-y-4">
+            <form onSubmit={handleSave} className="p-4 space-y-4">
               {error && (
                 <div className="p-3 bg-red-50 text-red-600 rounded-xl text-sm flex gap-2">
                   <AlertCircle size={18} /> {error}
@@ -195,46 +261,53 @@ export default function Produk() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Harga Modal</label>
-                  <input 
-                    type="number" min="0" required placeholder="15000"
-                    value={formData.cost_price}
-                    onChange={(e) => setFormData({...formData, cost_price: e.target.value === '' ? '' : parseInt(e.target.value)})}
-                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Harga Jual</label>
-                  <input 
-                    type="number" min="0" required placeholder="35000"
-                    value={formData.selling_price}
-                    onChange={(e) => setFormData({...formData, selling_price: e.target.value === '' ? '' : parseInt(e.target.value)})}
-                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
-                  />
-                </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Harga Jual</label>
+                <input
+                  type="number" min="0" required placeholder="35000"
+                  value={formData.selling_price}
+                  onChange={(e) => setFormData({...formData, selling_price: e.target.value === '' ? '' : parseInt(e.target.value)})}
+                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                />
+                <p className="text-xs text-gray-400 mt-1">Harga Modal (HPP) diisi lewat Kalkulator HPP.</p>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Stok Awal</label>
-                  <input 
-                    type="number" min="0" required
-                    value={formData.stock}
-                    onChange={(e) => setFormData({...formData, stock: e.target.value === '' ? '' : parseInt(e.target.value)})}
-                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">URL Gambar (Opsional)</label>
-                  <input 
-                    type="url" placeholder="https://..."
-                    value={formData.image_url}
-                    onChange={(e) => setFormData({...formData, image_url: e.target.value})}
-                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
-                  />
-                </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Stok Awal</label>
+                <input
+                  type="number" min="0" required
+                  value={formData.stock}
+                  onChange={(e) => setFormData({...formData, stock: e.target.value === '' ? '' : parseInt(e.target.value)})}
+                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Foto Produk (Opsional)</label>
+                <label className={`flex items-center gap-3 w-full px-4 py-3 bg-gray-50 dark:bg-gray-800 border-2 border-dashed ${imageUploading ? 'border-primary-400' : 'border-gray-200 dark:border-gray-700 hover:border-primary-400'} rounded-xl cursor-pointer transition-colors`}>
+                  <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={imageUploading} />
+                  {imageUploading ? (
+                    <><Loader2 size={18} className="animate-spin text-primary-500 shrink-0" /><span className="text-sm text-primary-500">Mengupload gambar...</span></>
+                  ) : formData.image_url && !formData.image_url.includes('ibb.co') ? (
+                    <div className="flex items-center gap-3 w-full">
+                      <img src={formData.image_url} alt="preview" className="w-12 h-12 object-cover rounded-lg shrink-0" />
+                      <div className="min-w-0">
+                        <p className="text-sm text-gray-700 dark:text-gray-300 font-medium">Gambar terpilih</p>
+                        <p className="text-xs text-gray-400 truncate">{formData.image_url}</p>
+                      </div>
+                      <button type="button" onClick={(e) => { e.preventDefault(); setFormData(p => ({ ...p, image_url: '' })); }} className="ml-auto text-gray-400 hover:text-red-500 shrink-0">
+                        <X size={16} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-3">
+                      <Upload size={18} className="text-gray-400 shrink-0" />
+                      <span className="text-sm text-gray-400">
+                        {formData.image_url?.includes('ibb.co') ? 'Foto lama tidak bisa dimuat — klik untuk upload ulang' : 'Klik untuk upload foto produk'}
+                      </span>
+                    </div>
+                  )}
+                </label>
               </div>
 
               <div className="pt-2">
@@ -242,7 +315,7 @@ export default function Produk() {
                   type="submit" disabled={formLoading}
                   className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2.5 rounded-xl text-sm font-medium transition-colors shadow-sm disabled:opacity-70"
                 >
-                  {formLoading ? <Loader2 className="animate-spin" size={18} /> : 'Simpan Produk'}
+                  {formLoading ? <Loader2 className="animate-spin" size={18} /> : (editingProduct ? 'Simpan Perubahan' : 'Simpan Produk')}
                 </button>
               </div>
             </form>

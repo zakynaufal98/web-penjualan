@@ -68,7 +68,7 @@ export default function Header() {
   return (
     <header className="h-16 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between px-4 sticky top-0 z-10">
       <div className="flex items-center gap-4 flex-1">
-        <button 
+        <button
           onClick={toggleSidebar}
           className="hidden md:flex p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-300 transition-colors"
         >

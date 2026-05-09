@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Search, Plus, Filter, MoreVertical, Edit2, Trash2, X, Loader2, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useStore } from '../store/useStore';
+import Toast from '../components/ui/Toast';
 
 export default function Penjualan() {
   const [searchTerm, setSearchTerm] = useState('');
@@ -17,8 +18,10 @@ export default function Penjualan() {
     payment_method: 'Cash',
     customer_name: ''
   });
+  const [editingTransaction, setEditingTransaction] = useState(null);
   const [formLoading, setFormLoading] = useState(false);
   const [error, setError] = useState('');
+  const [toast, setToast] = useState({ message: '', type: 'success' });
   const { user } = useStore();
 
   useEffect(() => {
@@ -46,7 +49,26 @@ export default function Penjualan() {
     setProducts(data || []);
   };
 
-  const handleAdd = async (e) => {
+  const openAdd = () => {
+    setEditingTransaction(null);
+    setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '' });
+    setError('');
+    setIsModalOpen(true);
+  };
+
+  const openEdit = (trx) => {
+    setEditingTransaction(trx);
+    setFormData({
+      product_id: trx.product_id,
+      quantity: trx.quantity,
+      payment_method: trx.payment_method,
+      customer_name: trx.customer_name || ''
+    });
+    setError('');
+    setIsModalOpen(true);
+  };
+
+  const handleSave = async (e) => {
     e.preventDefault();
     setFormLoading(true);
     setError('');
@@ -60,29 +82,39 @@ export default function Penjualan() {
     const selectedProduct = products.find(p => p.id === formData.product_id);
     if (!selectedProduct) return;
 
-    const { data, error: insertError } = await supabase.from('sales').insert([{
+    const payload = {
       product_id: formData.product_id,
       quantity: formData.quantity,
       unit_price: selectedProduct.selling_price,
+      total_price: selectedProduct.selling_price * formData.quantity,
       payment_method: formData.payment_method,
       customer_name: formData.customer_name || null,
-      created_by: user?.id
-    }]).select();
+    };
 
-    if (insertError) {
-      setError(insertError.message);
+    const { error: dbError } = editingTransaction
+      ? await supabase.from('sales').update(payload).eq('id', editingTransaction.id)
+      : await supabase.from('sales').insert([{ ...payload, created_by: user?.id }]);
+
+    if (dbError) {
+      setError(dbError.message);
     } else {
       setIsModalOpen(false);
       setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '' });
-      fetchTransactions(); // Refresh
+      setToast({ message: editingTransaction ? 'Transaksi berhasil diperbarui!' : 'Penjualan berhasil dicatat!', type: 'success' });
+      fetchTransactions();
     }
     setFormLoading(false);
   };
 
   const handleDelete = async (id) => {
     if (confirm('Yakin ingin menghapus transaksi ini?')) {
-      await supabase.from('sales').delete().eq('id', id);
-      fetchTransactions();
+      const { error: delError } = await supabase.from('sales').delete().eq('id', id);
+      if (delError) {
+        setToast({ message: 'Gagal menghapus transaksi.', type: 'error' });
+      } else {
+        setToast({ message: 'Transaksi berhasil dihapus.', type: 'success' });
+        fetchTransactions();
+      }
     }
   };
 
@@ -93,8 +125,8 @@ export default function Penjualan() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-50">Data Penjualan</h1>
           <p className="text-gray-500 dark:text-gray-400 mt-1 text-sm sm:text-base">Catat dan kelola transaksi penjualan kue.</p>
         </div>
-        <button 
-          onClick={() => setIsModalOpen(true)}
+        <button
+          onClick={openAdd}
           className="w-full sm:w-auto flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors shadow-sm shadow-primary-600/20"
         >
           <Plus size={18} />
@@ -152,9 +184,14 @@ export default function Penjualan() {
                     </td>
                     <td className="p-4 text-gray-500 dark:text-gray-400">{trx.customer_name || '-'}</td>
                     <td className="p-4">
-                      <button onClick={() => handleDelete(trx.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors">
-                        <Trash2 size={16} />
-                      </button>
+                      <div className="flex gap-1">
+                        <button onClick={() => openEdit(trx)} className="p-2 text-gray-400 hover:text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/20 rounded-lg transition-colors">
+                          <Edit2 size={16} />
+                        </button>
+                        <button onClick={() => handleDelete(trx.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors">
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -164,18 +201,20 @@ export default function Penjualan() {
         </div>
       </div>
 
+      <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
+
       {/* Modal Tambah */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-start justify-center p-4 sm:p-6 bg-black/50 backdrop-blur-sm overflow-y-auto">
           <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 w-full max-w-md my-8 sm:my-auto h-fit">
             <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800">
-              <h2 className="text-lg font-bold text-gray-900 dark:text-white">Tambah Penjualan</h2>
+              <h2 className="text-lg font-bold text-gray-900 dark:text-white">{editingTransaction ? 'Edit Transaksi' : 'Tambah Penjualan'}</h2>
               <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
                 <X size={20} />
               </button>
             </div>
             
-            <form onSubmit={handleAdd} className="p-4 space-y-4">
+            <form onSubmit={handleSave} className="p-4 space-y-4">
               {error && (
                 <div className="p-3 bg-red-50 text-red-600 rounded-xl text-sm flex gap-2">
                   <AlertCircle size={18} /> {error}
@@ -237,7 +276,7 @@ export default function Penjualan() {
                   type="submit" disabled={formLoading}
                   className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2.5 rounded-xl text-sm font-medium transition-colors shadow-sm disabled:opacity-70"
                 >
-                  {formLoading ? <Loader2 className="animate-spin" size={18} /> : 'Simpan Transaksi'}
+                  {formLoading ? <Loader2 className="animate-spin" size={18} /> : (editingTransaction ? 'Simpan Perubahan' : 'Simpan Transaksi')}
                 </button>
               </div>
             </form>

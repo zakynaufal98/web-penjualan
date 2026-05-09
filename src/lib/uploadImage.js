@@ -1,54 +1,28 @@
-import imageCompression from 'browser-image-compression';
 import { supabase } from './supabase';
+import imageCompression from 'browser-image-compression';
 
-/**
- * Mengompres dan mengunggah gambar ke Supabase Storage
- * @param {File} file - File gambar asli dari input
- * @param {string} bucketName - Nama bucket di Supabase (misal: 'struk_belanja')
- * @returns {Promise<string>} URL gambar yang berhasil diunggah
- */
-export const uploadAndCompressImage = async (file, bucketName = 'struk_belanja') => {
-  if (!file) throw new Error("File tidak ditemukan");
+export const uploadProductImage = async (file) => {
+  if (!file) throw new Error('File tidak ditemukan');
 
-  try {
-    // 1. Opsi Kompresi Gambar
-    const options = {
-      maxSizeMB: 0.2, // Maksimal ukuran file 200KB (Mencegah storage cepat penuh)
-      maxWidthOrHeight: 1024, // Resolusi maksimal 1024px
-      useWebWorker: true,
-      fileType: 'image/webp' // Mengonversi file ke webp agar ukurannya jauh lebih kecil
-    };
+  // Kompres gambar sebelum upload (maks 300KB, lebar 1200px)
+  const compressed = await imageCompression(file, {
+    maxSizeMB: 0.3,
+    maxWidthOrHeight: 1200,
+    useWebWorker: true,
+  });
 
-    // 2. Proses Kompresi
-    // Gambar asli akan diperkecil sesuai opsi di atas
-    const compressedFile = await imageCompression(file, options);
-    
-    // Buat nama file unik agar tidak saling menimpa
-    const fileExt = 'webp';
-    const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
-    const filePath = `${fileName}`;
+  const ext = file.name.split('.').pop().toLowerCase();
+  const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${ext}`;
 
-    // 3. Upload gambar yang sudah dikompres ke Supabase
-    const { error } = await supabase.storage
-      .from(bucketName)
-      .upload(filePath, compressedFile, {
-        cacheControl: '3600',
-        upsert: false
-      });
+  const { data, error } = await supabase.storage
+    .from('product-images')
+    .upload(fileName, compressed, { cacheControl: '3600', upsert: false });
 
-    if (error) {
-      throw error;
-    }
+  if (error) throw error;
 
-    // 4. Dapatkan URL publik gambar untuk disimpan ke database
-    const { data: publicUrlData } = supabase.storage
-      .from(bucketName)
-      .getPublicUrl(filePath);
+  const { data: { publicUrl } } = supabase.storage
+    .from('product-images')
+    .getPublicUrl(data.path);
 
-    return publicUrlData.publicUrl;
-
-  } catch (error) {
-    console.error("Gagal mengunggah gambar:", error);
-    throw error;
-  }
+  return publicUrl;
 };

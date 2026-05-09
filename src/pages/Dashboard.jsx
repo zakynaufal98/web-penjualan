@@ -1,10 +1,9 @@
 import { useState, useEffect } from 'react';
-import { 
-  TrendingUp, 
-  TrendingDown, 
-  DollarSign, 
-  ShoppingBag, 
-  Package, 
+import {
+  TrendingUp,
+  DollarSign,
+  ShoppingBag,
+  Package,
   CreditCard,
   Loader2
 } from 'lucide-react';
@@ -47,7 +46,8 @@ export default function Dashboard() {
     todaySales: 0,
     todayExpenses: 0,
     todayProfit: 0,
-    todayTransactions: 0
+    todayUnitsSold: 0,
+    todayProduced: 0
   });
   const [chartData, setChartData] = useState([]);
   const [bestSellers, setBestSellers] = useState([]);
@@ -73,16 +73,23 @@ export default function Dashboard() {
       .select('*')
       .gte('purchase_date', sevenDaysAgo.toISOString());
 
+    // Fetch Production Logs (optional — table may not exist yet)
+    const { data: productionData } = await supabase
+      .from('production_logs')
+      .select('quantity, production_date')
+      .gte('production_date', sevenDaysAgo.toISOString());
+
     if (salesData && expensesData) {
       // Calculate Today's Stats
       let tSales = 0;
       let tExpenses = 0;
-      let tTrans = 0;
+      let tUnits = 0;
+      let tProduced = 0;
 
       salesData.forEach(sale => {
         if (isSameDay(new Date(sale.transaction_date), today)) {
           tSales += sale.total_price || (sale.unit_price * sale.quantity);
-          tTrans += 1;
+          tUnits += sale.quantity;
         }
       });
 
@@ -92,11 +99,18 @@ export default function Dashboard() {
         }
       });
 
+      (productionData || []).forEach(log => {
+        if (isSameDay(new Date(log.production_date), today)) {
+          tProduced += log.quantity;
+        }
+      });
+
       setStats({
         todaySales: tSales,
         todayExpenses: tExpenses,
         todayProfit: tSales - tExpenses,
-        todayTransactions: tTrans
+        todayUnitsSold: tUnits,
+        todayProduced: tProduced
       });
 
       // Calculate Chart Data (Last 7 Days)
@@ -168,19 +182,19 @@ export default function Dashboard() {
           icon={TrendingUp}
           color="emerald"
         />
-        <StatCard 
+        <StatCard
           loading={loading}
-          title="Pengeluaran Modal" 
-          value={`Rp ${stats.todayExpenses.toLocaleString('id-ID')}`}
-          icon={CreditCard}
-          color="red"
-        />
-        <StatCard 
-          loading={loading}
-          title="Total Transaksi" 
-          value={stats.todayTransactions}
+          title="Item Terjual"
+          value={`${stats.todayUnitsSold} pcs`}
           icon={ShoppingBag}
           color="blue"
+        />
+        <StatCard
+          loading={loading}
+          title="Produksi Hari Ini"
+          value={`${stats.todayProduced} pcs`}
+          icon={Package}
+          color="amber"
         />
       </div>
 

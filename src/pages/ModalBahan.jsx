@@ -1,9 +1,13 @@
-import { useState, useEffect } from 'react';
-import { Search, Plus, Filter, Edit2, Trash2, X, Loader2, AlertCircle, Camera, Image as ImageIcon } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { Search, Plus, Trash2, X, Loader2, AlertCircle, Camera, Image as ImageIcon, TrendingDown, TrendingUp, Minus, Lightbulb, BarChart2, Edit2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import Toast from '../components/ui/Toast';
 import { uploadToImgBB } from '../lib/uploadImgBB';
+import { format } from 'date-fns';
+import { id as localeId } from 'date-fns/locale';
 
 export default function ModalBahan() {
+  const [activeTab, setActiveTab] = useState('riwayat');
   const [searchTerm, setSearchTerm] = useState('');
   const [ingredients, setIngredients] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -25,12 +29,27 @@ export default function ModalBahan() {
     category: '',
     quantity: 1,
     unit: 'kg',
-    unit_price: 0
+    unit_price: 0,
+    content_count: '',   // berapa isi per kemasan (cth: 6 sachet) — UI only
+    content_weight: '',  // berat/volume per isi (cth: 60gr) — UI only
+    items_per_unit: '',  // total yang disimpan ke DB = content_count × content_weight
+    base_unit: 'gr'
   });
+
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editFormData, setEditFormData] = useState({
+    id: '', name: '', category: '', supplier: '', purchase_date: '',
+    quantity: 1, unit: 'kg', unit_price: 0,
+    content_count: '', content_weight: '', items_per_unit: '', base_unit: 'gr'
+  });
+  const [originalEditQty, setOriginalEditQty] = useState(0);
 
   const [formLoading, setFormLoading] = useState(false);
   const [isUploadingReceipt, setIsUploadingReceipt] = useState(false);
+  const [localPreview, setLocalPreview] = useState('');
+  const [uploadFailed, setUploadFailed] = useState(false);
   const [error, setError] = useState('');
+  const [toast, setToast] = useState({ message: '', type: 'success' });
 
   useEffect(() => {
     fetchIngredients();
@@ -51,6 +70,13 @@ export default function ModalBahan() {
     setLoading(false);
   };
 
+  const computeItemsPerUnit = (count, weight) => {
+    const c = parseFloat(count);
+    const w = parseFloat(weight);
+    if (!w) return '';
+    return isNaN(c) ? w : c * w;
+  };
+
   const handleAddToCart = (e) => {
     e.preventDefault();
     setError('');
@@ -60,8 +86,9 @@ export default function ModalBahan() {
       return;
     }
 
-    setCart([...cart, { ...currentItem, id: Date.now() }]);
-    setCurrentItem({ name: '', category: '', quantity: 1, unit: 'kg', unit_price: 0 });
+    const computed = computeItemsPerUnit(currentItem.content_count, currentItem.content_weight);
+    setCart([...cart, { ...currentItem, items_per_unit: computed, id: Date.now() }]);
+    setCurrentItem({ name: '', category: '', quantity: 1, unit: 'kg', unit_price: 0, content_count: '', content_weight: '', items_per_unit: '', base_unit: 'gr' });
   };
 
   const removeFromCart = (id) => {
@@ -73,7 +100,7 @@ export default function ModalBahan() {
       setError('Keranjang masih kosong, tambahkan minimal 1 bahan.');
       return;
     }
-    
+
     setFormLoading(true);
     setError('');
 
@@ -84,6 +111,8 @@ export default function ModalBahan() {
       quantity: item.quantity,
       unit: item.unit,
       unit_price: item.unit_price,
+      items_per_unit: item.items_per_unit ? parseFloat(item.items_per_unit) : null,
+      base_unit: item.items_per_unit ? item.base_unit : null,
       receipt_url: transactionInfo.receipt_url || null,
       purchase_date: new Date(transactionInfo.purchase_date).toISOString()
     }));
@@ -92,36 +121,241 @@ export default function ModalBahan() {
 
     if (insertError) {
       setError(insertError.message);
+      setFormLoading(false);
+      return;
+    }
+
+    // Update ingredient_masters: naikkan stok untuk tiap item yang dibeli
+    for (const item of cart) {
+      const { data: master } = await supabase
+        .from('ingredient_masters')
+        .select('id, current_stock')
+        .eq('name', item.name.trim())
+        .maybeSingle();
+
+      const itemsPerUnit = item.items_per_unit ? parseFloat(item.items_per_unit) : null;
+      const baseUnit = itemsPerUnit ? item.base_unit : null;
+
+      if (master) {
+        await supabase
+          .from('ingredient_masters')
+          .update({
+            current_stock: (master.current_stock || 0) + item.quantity,
+            ...(itemsPerUnit && { items_per_unit: itemsPerUnit, base_unit: baseUnit }),
+          })
+          .eq('id', master.id);
+      } else {
+        await supabase
+          .from('ingredient_masters')
+          .insert({ name: item.name.trim(), category: item.category, unit: item.unit, current_stock: item.quantity, items_per_unit: itemsPerUnit, base_unit: baseUnit });
+      }
+    }
+
+    setIsModalOpen(false);
+    setCart([]);
+    setTransactionInfo({ supplier: '', receipt_url: '', purchase_date: new Date().toISOString().split('T')[0] });
+    setToast({ message: `${cart.length} bahan berhasil disimpan!`, type: 'success' });
+    fetchIngredients();
+    setFormLoading(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (confirm('Yakin ingin menghapus riwayat pembelian ini? Stok bahan akan dikurangi sesuai jumlah pembelian ini.')) {
+      const item = ingredients.find(i => i.id === id);
+
+      const { error: delError } = await supabase.from('ingredients').delete().eq('id', id);
+      if (delError) {
+        setToast({ message: 'Gagal menghapus data.', type: 'error' });
+        return;
+      }
+
+      // Kurangi stok di ingredient_masters sesuai qty yang dihapus
+      if (item) {
+        const { data: master } = await supabase
+          .from('ingredient_masters')
+          .select('id, current_stock')
+          .eq('name', item.name.trim())
+          .maybeSingle();
+
+        if (master) {
+          await supabase
+            .from('ingredient_masters')
+            .update({ current_stock: Math.max(0, (master.current_stock || 0) - item.quantity) })
+            .eq('id', master.id);
+        }
+      }
+
+      setToast({ message: 'Riwayat pembelian dihapus dan stok dikurangi.', type: 'success' });
+      fetchIngredients();
+    }
+  };
+
+  const openEditIngredient = (item) => {
+    setEditFormData({
+      id: item.id,
+      name: item.name,
+      category: item.category,
+      supplier: item.supplier || '',
+      purchase_date: item.purchase_date ? item.purchase_date.split('T')[0] : new Date().toISOString().split('T')[0],
+      quantity: item.quantity,
+      unit: item.unit,
+      unit_price: item.unit_price,
+      content_count: '',
+      content_weight: item.items_per_unit || '',
+      items_per_unit: item.items_per_unit || '',
+      base_unit: item.base_unit || 'gr'
+    });
+    setOriginalEditQty(item.quantity);
+    setIsEditModalOpen(true);
+  };
+
+  const handleEditSave = async (e) => {
+    e.preventDefault();
+    setFormLoading(true);
+    setError('');
+    const computed = computeItemsPerUnit(editFormData.content_count, editFormData.content_weight);
+    const itemsPerUnit = computed ? parseFloat(computed) : null;
+
+    const { error: dbError } = await supabase
+      .from('ingredients')
+      .update({
+        name: editFormData.name,
+        category: editFormData.category,
+        supplier: editFormData.supplier || null,
+        quantity: editFormData.quantity,
+        unit: editFormData.unit,
+        unit_price: editFormData.unit_price,
+        items_per_unit: itemsPerUnit,
+        base_unit: itemsPerUnit ? editFormData.base_unit : null,
+        purchase_date: new Date(editFormData.purchase_date).toISOString()
+      })
+      .eq('id', editFormData.id);
+
+    if (dbError) {
+      setError(dbError.message);
     } else {
-      setIsModalOpen(false);
-      setCart([]);
-      setTransactionInfo({ supplier: '', receipt_url: '', purchase_date: new Date().toISOString().split('T')[0] });
+      // Sync ingredient_masters: adjust stok (selisih qty) + update items_per_unit
+      const { data: master } = await supabase
+        .from('ingredient_masters')
+        .select('id, current_stock')
+        .eq('name', editFormData.name.trim())
+        .maybeSingle();
+
+      if (master) {
+        const qtyDiff = editFormData.quantity - originalEditQty;
+        await supabase
+          .from('ingredient_masters')
+          .update({
+            current_stock: Math.max(0, (master.current_stock || 0) + qtyDiff),
+            items_per_unit: itemsPerUnit,
+            base_unit: itemsPerUnit ? editFormData.base_unit : null,
+          })
+          .eq('id', master.id);
+      }
+
+      setIsEditModalOpen(false);
+      setToast({ message: 'Data pembelian berhasil diperbarui!', type: 'success' });
       fetchIngredients();
     }
     setFormLoading(false);
   };
 
-  const handleDelete = async (id) => {
-    if (confirm('Yakin ingin menghapus riwayat pembelian ini?')) {
-      await supabase.from('ingredients').delete().eq('id', id);
-      fetchIngredients();
+  // ── Perbandingan Harga ──────────────────────────────────────────────────────
+
+  const getPricePerBaseUnit = (ing) => {
+    if (ing.items_per_unit && ing.base_unit) {
+      return { price: ing.unit_price / ing.items_per_unit, unit: ing.base_unit };
     }
+    if (ing.unit === 'kg')    return { price: ing.unit_price / 1000, unit: 'gr' };
+    if (ing.unit === 'liter') return { price: ing.unit_price / 1000, unit: 'ml' };
+    return { price: ing.unit_price, unit: ing.unit };
   };
+
+  const comparisonData = useMemo(() => {
+    const grouped = {};
+    ingredients.forEach(ing => {
+      const key = ing.name.trim().toLowerCase();
+      if (!grouped[key]) grouped[key] = { name: ing.name, entries: [] };
+      grouped[key].entries.push(ing);
+    });
+
+    return Object.values(grouped).map(group => {
+      const supplierMap = {};
+      group.entries.forEach(ing => {
+        const supplier = ing.supplier?.trim() || 'Tanpa Supplier';
+        const { price, unit } = getPricePerBaseUnit(ing);
+        if (!supplierMap[supplier]) supplierMap[supplier] = { supplier, unit, history: [] };
+        supplierMap[supplier].history.push({ date: ing.purchase_date, price: Math.round(price * 10) / 10 });
+      });
+
+      const suppliers = Object.values(supplierMap).map(s => {
+        const sorted = [...s.history].sort((a, b) => new Date(b.date) - new Date(a.date));
+        const trend = sorted.length >= 2
+          ? sorted[0].price < sorted[1].price ? 'down'
+          : sorted[0].price > sorted[1].price ? 'up' : 'flat'
+          : 'flat';
+        return { ...s, history: sorted, latestPrice: sorted[0].price, latestDate: sorted[0].date, trend };
+      }).sort((a, b) => a.latestPrice - b.latestPrice);
+
+      if (suppliers.length === 0) return null;
+
+      const cheapest = suppliers[0];
+      const priciest = suppliers[suppliers.length - 1];
+
+      return {
+        name: group.name,
+        suppliers,
+        baseUnit: cheapest.unit,
+        cheapestSupplier: cheapest.supplier,
+        cheapestPrice: cheapest.latestPrice,
+        maxSavingsPerUnit: suppliers.length > 1 ? priciest.latestPrice - cheapest.latestPrice : 0,
+        hasMultipleSuppliers: suppliers.length > 1,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.maxSavingsPerUnit - a.maxSavingsPerUnit);
+  }, [ingredients]);
+
+  const summaryStats = useMemo(() => {
+    const withAlt = comparisonData.filter(d => d.hasMultipleSuppliers);
+    const topSavings = withAlt.slice(0, 3);
+    // Estimasi penghematan: ambil quantity terbaru dari non-cheapest supplier
+    let totalSavingsEstimate = 0;
+    withAlt.forEach(item => {
+      const nonCheapest = item.suppliers.slice(1);
+      nonCheapest.forEach(s => {
+        const diff = s.latestPrice - item.cheapestPrice;
+        // Estimasi qty: ambil dari riwayat terakhir pembelian di supplier ini
+        const lastEntry = ingredients.find(i =>
+          i.name.trim().toLowerCase() === item.name.trim().toLowerCase() &&
+          (i.supplier?.trim() || 'Tanpa Supplier') === s.supplier
+        );
+        if (lastEntry) totalSavingsEstimate += diff * (lastEntry.quantity || 1);
+      });
+    });
+    return { withAlt: withAlt.length, topSavings, totalSavingsEstimate: Math.round(totalSavingsEstimate) };
+  }, [comparisonData, ingredients]);
+
+  // ── End Perbandingan Harga ──────────────────────────────────────────────────
 
   const handleCapturePhoto = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
+    const objectUrl = URL.createObjectURL(file);
+    setLocalPreview(objectUrl);
+    setUploadFailed(false);
     setIsUploadingReceipt(true);
     setError('');
     try {
       const url = await uploadToImgBB(file);
-      setTransactionInfo({ ...transactionInfo, receipt_url: url });
+      setTransactionInfo(prev => ({ ...prev, receipt_url: url }));
     } catch (err) {
       console.error(err);
-      setError('Gagal mengunggah foto struk.');
+      setUploadFailed(true);
     } finally {
       setIsUploadingReceipt(false);
+      URL.revokeObjectURL(objectUrl);
     }
   };
 
@@ -141,13 +375,34 @@ export default function ModalBahan() {
         </button>
       </div>
 
+      {/* Tab Navigation */}
+      <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-xl p-1 w-full sm:w-fit">
+        <button
+          onClick={() => setActiveTab('riwayat')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'riwayat' ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+        >
+          <Search size={15} /> Riwayat Pembelian
+        </button>
+        <button
+          onClick={() => setActiveTab('perbandingan')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'perbandingan' ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+        >
+          <BarChart2 size={15} /> Perbandingan Harga
+          {summaryStats.withAlt > 0 && (
+            <span className="bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400 text-xs px-1.5 py-0.5 rounded-full">{summaryStats.withAlt}</span>
+          )}
+        </button>
+      </div>
+
+      {/* ── TAB: Riwayat Pembelian ── */}
+      {activeTab === 'riwayat' && (
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
         <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50">
           <div className="relative w-full sm:w-72">
             <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input 
-              type="text" 
-              placeholder="Cari bahan baku..." 
+            <input
+              type="text"
+              placeholder="Cari bahan baku..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-10 pr-4 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 rounded-xl text-sm outline-none transition-all"
@@ -192,12 +447,15 @@ export default function ModalBahan() {
                     <td className="p-4 text-right text-gray-900 dark:text-gray-100 whitespace-nowrap">{item.quantity} {item.unit}</td>
                     <td className="p-4 text-right text-gray-500 dark:text-gray-400 whitespace-nowrap">Rp {item.unit_price.toLocaleString('id-ID')}</td>
                     <td className="p-4 text-right font-medium text-red-600 dark:text-red-400 whitespace-nowrap">Rp {(item.quantity * item.unit_price).toLocaleString('id-ID')}</td>
-                    <td className="p-4 flex items-center gap-2">
+                    <td className="p-4 flex items-center gap-1">
                       {item.receipt_url && (
                         <button onClick={() => setSelectedImage(item.receipt_url)} title="Lihat Struk" className="p-2 text-gray-400 hover:text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/20 rounded-lg transition-colors">
                           <ImageIcon size={16} />
                         </button>
                       )}
+                      <button onClick={() => openEditIngredient(item)} title="Edit" className="p-2 text-gray-400 hover:text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/20 rounded-lg transition-colors">
+                        <Edit2 size={16} />
+                      </button>
                       <button onClick={() => handleDelete(item.id)} title="Hapus" className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors">
                         <Trash2 size={16} />
                       </button>
@@ -209,6 +467,133 @@ export default function ModalBahan() {
           </table>
         </div>
       </div>
+      )} {/* end tab riwayat */}
+
+      {/* ── TAB: Perbandingan Harga ── */}
+      {activeTab === 'perbandingan' && (
+        <div className="space-y-6">
+
+          {/* Summary cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 border border-gray-100 dark:border-gray-800 shadow-sm">
+              <p className="text-sm text-gray-500 mb-1">Bahan dengan alternatif</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-white">{summaryStats.withAlt} <span className="text-sm font-normal text-gray-400">bahan</span></p>
+            </div>
+            <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 border border-gray-100 dark:border-gray-800 shadow-sm">
+              <p className="text-sm text-gray-500 mb-1">Potensi penghematan</p>
+              <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">
+                Rp {summaryStats.totalSavingsEstimate.toLocaleString('id-ID')}
+              </p>
+              <p className="text-xs text-gray-400 mt-0.5">jika selalu beli di supplier termurah</p>
+            </div>
+            <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 border border-gray-100 dark:border-gray-800 shadow-sm">
+              <p className="text-sm text-gray-500 mb-1">Penghematan terbesar</p>
+              {summaryStats.topSavings[0] ? (
+                <>
+                  <p className="text-sm font-bold text-gray-900 dark:text-white truncate">{summaryStats.topSavings[0].name}</p>
+                  <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-0.5">
+                    hemat Rp {summaryStats.topSavings[0].maxSavingsPerUnit.toFixed(1)}/{summaryStats.topSavings[0].baseUnit}
+                  </p>
+                </>
+              ) : <p className="text-sm text-gray-400">Belum ada data</p>}
+            </div>
+          </div>
+
+          {/* Rekomendasi belanja */}
+          {summaryStats.topSavings.length > 0 && (
+            <div className="bg-primary-50 dark:bg-primary-900/10 border border-primary-100 dark:border-primary-900/30 rounded-2xl p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <Lightbulb size={18} className="text-primary-600 dark:text-primary-400" />
+                <h3 className="font-semibold text-primary-800 dark:text-primary-300 text-sm">Rekomendasi Belanja</h3>
+              </div>
+              <ul className="space-y-2">
+                {summaryStats.topSavings.map(item => (
+                  <li key={item.name} className="flex items-start gap-2 text-sm text-primary-700 dark:text-primary-300">
+                    <span className="text-primary-400 mt-0.5">→</span>
+                    <span>
+                      Beli <strong>{item.name}</strong> di <strong>{item.cheapestSupplier}</strong>
+                      {' '}(Rp {item.cheapestPrice.toFixed(1)}/{item.baseUnit})
+                      {' '}&nbsp;—&nbsp; hemat Rp {item.maxSavingsPerUnit.toFixed(1)}/{item.baseUnit} dibanding opsi termahal
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Kartu per bahan */}
+          {loading ? (
+            <div className="p-8 text-center text-gray-500">Memuat data...</div>
+          ) : comparisonData.length === 0 ? (
+            <div className="bg-white dark:bg-gray-900 rounded-2xl p-8 text-center border border-gray-100 dark:border-gray-800 text-gray-500">
+              Belum ada data bahan baku. Tambahkan pembelian terlebih dahulu.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {comparisonData.map(item => (
+                <div key={item.name} className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 shadow-sm overflow-hidden">
+                  <div className="px-5 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
+                    <h4 className="font-bold text-gray-900 dark:text-white text-sm">{item.name}</h4>
+                    {item.hasMultipleSuppliers ? (
+                      <span className="text-xs bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400 px-2 py-0.5 rounded-full font-medium">
+                        {item.suppliers.length} supplier
+                      </span>
+                    ) : (
+                      <span className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-500 px-2 py-0.5 rounded-full">1 supplier</span>
+                    )}
+                  </div>
+                  <div className="divide-y divide-gray-50 dark:divide-gray-800">
+                    {item.suppliers.map((s, idx) => {
+                      const isCheapest = idx === 0;
+                      const pctMore = isCheapest ? 0 : Math.round(((s.latestPrice - item.cheapestPrice) / item.cheapestPrice) * 100);
+                      return (
+                        <div key={s.supplier} className={`px-5 py-3 flex items-center justify-between gap-3 ${isCheapest && item.hasMultipleSuppliers ? 'bg-emerald-50/50 dark:bg-emerald-900/10' : ''}`}>
+                          <div className="flex items-center gap-2 min-w-0">
+                            {isCheapest && item.hasMultipleSuppliers && (
+                              <span className="shrink-0 text-xs bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded font-medium">termurah</span>
+                            )}
+                            <span className="text-sm text-gray-700 dark:text-gray-300 truncate">{s.supplier}</span>
+                          </div>
+                          <div className="flex items-center gap-3 shrink-0">
+                            {/* Tren harga */}
+                            <span className={`flex items-center gap-0.5 text-xs ${s.trend === 'down' ? 'text-emerald-500' : s.trend === 'up' ? 'text-red-500' : 'text-gray-400'}`}>
+                              {s.trend === 'down' ? <TrendingDown size={13} /> : s.trend === 'up' ? <TrendingUp size={13} /> : <Minus size={13} />}
+                            </span>
+                            <span className="font-semibold text-sm text-gray-900 dark:text-gray-100">
+                              Rp {s.latestPrice.toFixed(1)}<span className="text-xs font-normal text-gray-400">/{item.baseUnit}</span>
+                            </span>
+                            {!isCheapest && item.hasMultipleSuppliers && (
+                              <span className="text-xs text-red-500 dark:text-red-400">+{pctMore}%</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {/* Riwayat harga terakhir */}
+                  {item.suppliers.some(s => s.history.length > 1) && (
+                    <div className="px-5 py-3 bg-gray-50/50 dark:bg-gray-800/30 border-t border-gray-100 dark:border-gray-800">
+                      <p className="text-xs text-gray-400 mb-1.5">Riwayat pembelian terakhir:</p>
+                      <div className="space-y-1">
+                        {item.suppliers.flatMap(s =>
+                          s.history.slice(0, 2).map((h, i) => (
+                            <div key={`${s.supplier}-${i}`} className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
+                              <span>{s.supplier} · {format(new Date(h.date), 'd MMM yyyy', { locale: localeId })}</span>
+                              <span className="font-medium">Rp {h.price.toFixed(1)}/{item.baseUnit}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )} {/* end tab perbandingan */}
+
+      <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
 
       {/* Modal Tambah */}
       {isModalOpen && (
@@ -216,7 +601,7 @@ export default function ModalBahan() {
           <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 w-full max-w-2xl my-8 sm:my-auto h-fit">
             <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800 sticky top-0 bg-white dark:bg-gray-900 rounded-t-2xl z-10">
               <h2 className="text-lg font-bold text-gray-900 dark:text-white">Tambah Pembelian Bahan Baku</h2>
-              <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                      <button onClick={() => { setIsModalOpen(false); setLocalPreview(''); setUploadFailed(false); }} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
                 <X size={20} />
               </button>
             </div>
@@ -258,29 +643,66 @@ export default function ModalBahan() {
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Foto Struk (Opsional)</label>
-                  {transactionInfo.receipt_url ? (
-                    <div className="relative inline-block">
-                      <img src={transactionInfo.receipt_url} alt="Struk" className="h-32 rounded-lg border border-gray-200 dark:border-gray-700 object-cover" />
-                      <button 
-                        type="button" 
-                        onClick={() => setTransactionInfo({...transactionInfo, receipt_url: ''})}
-                        className="absolute -top-2 -right-2 bg-red-100 hover:bg-red-200 text-red-600 rounded-full p-1 shadow-sm transition-colors"
-                      >
-                        <X size={14} />
-                      </button>
+
+                  {/* Preview gambar */}
+                  {(localPreview || transactionInfo.receipt_url) && (
+                    <div className="relative inline-block mb-3">
+                      <img
+                        src={transactionInfo.receipt_url || localPreview}
+                        alt="Struk"
+                        className="h-32 rounded-lg border border-gray-200 dark:border-gray-700 object-cover"
+                      />
+                      {isUploadingReceipt && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-lg">
+                          <Loader2 className="animate-spin text-white" size={24} />
+                          <span className="sr-only">Mengupload...</span>
+                        </div>
+                      )}
+                      {!isUploadingReceipt && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTransactionInfo(prev => ({ ...prev, receipt_url: '' }));
+                            setLocalPreview('');
+                            setUploadFailed(false);
+                          }}
+                          className="absolute -top-2 -right-2 bg-red-100 hover:bg-red-200 text-red-600 rounded-full p-1 shadow-sm transition-colors"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
                     </div>
-                  ) : (
+                  )}
+
+                  {/* Tombol upload — hanya tampil jika belum ada gambar */}
+                  {!localPreview && !transactionInfo.receipt_url && (
                     <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-                      <label className={`flex-1 w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-sm font-medium text-gray-700 dark:text-gray-300 shadow-sm transition-all cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 ${isUploadingReceipt ? 'opacity-50 pointer-events-none' : ''}`}>
-                        {isUploadingReceipt ? <Loader2 className="animate-spin text-primary-500" size={18} /> : <Camera className="text-gray-400" size={18} />}
+                      <label className="flex-1 w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-sm font-medium text-gray-700 dark:text-gray-300 shadow-sm transition-all cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800">
+                        <Camera className="text-gray-400" size={18} />
                         <span>Kamera</span>
-                        <input type="file" accept="image/*" capture="environment" onChange={handleCapturePhoto} className="hidden" disabled={isUploadingReceipt} />
+                        <input type="file" accept="image/jpeg,image/jpg,image/png,image/webp" capture="environment" onChange={handleCapturePhoto} className="hidden" />
                       </label>
-                      <label className={`flex-1 w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-sm font-medium text-gray-700 dark:text-gray-300 shadow-sm transition-all cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 ${isUploadingReceipt ? 'opacity-50 pointer-events-none' : ''}`}>
-                        {isUploadingReceipt ? <Loader2 className="animate-spin text-primary-500" size={18} /> : <ImageIcon className="text-gray-400" size={18} />}
+                      <label className="flex-1 w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-sm font-medium text-gray-700 dark:text-gray-300 shadow-sm transition-all cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800">
+                        <ImageIcon className="text-gray-400" size={18} />
                         <span>Galeri</span>
-                        <input type="file" accept="image/*" onChange={handleCapturePhoto} className="hidden" disabled={isUploadingReceipt} />
+                        <input type="file" accept="image/jpeg,image/jpg,image/png,image/webp" onChange={handleCapturePhoto} className="hidden" />
                       </label>
+                    </div>
+                  )}
+
+                  {/* Fallback: input URL manual jika upload gagal */}
+                  {uploadFailed && (
+                    <div className="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl space-y-2">
+                      <p className="text-xs text-amber-700 dark:text-amber-400 font-medium">
+                        Upload otomatis gagal (masalah koneksi SSL). Tempel URL gambar secara manual:
+                      </p>
+                      <input
+                        type="url"
+                        placeholder="https://contoh.com/foto-struk.jpg"
+                        value={transactionInfo.receipt_url}
+                        onChange={(e) => setTransactionInfo(prev => ({ ...prev, receipt_url: e.target.value }))}
+                        className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-sm focus:border-primary-500 outline-none"
+                      />
                     </div>
                   )}
                 </div>
@@ -316,22 +738,29 @@ export default function ModalBahan() {
                           }, {}))
                             .filter(ing => ing.name.toLowerCase().includes(currentItem.name.toLowerCase()))
                             .map(ing => (
-                              <div 
-                                key={ing.id} 
+                              <div
+                                key={ing.id}
                                 className="px-4 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer text-sm border-b border-gray-50 dark:border-gray-800/50 last:border-0"
                                 onClick={() => {
                                   setCurrentItem({
-                                    ...currentItem, 
-                                    name: ing.name, 
+                                    ...currentItem,
+                                    name: ing.name,
                                     category: ing.category,
                                     unit: ing.unit,
-                                    unit_price: ing.unit_price
+                                    unit_price: ing.unit_price,
+                                    items_per_unit: ing.items_per_unit || '',
+                                    base_unit: ing.base_unit || 'gr',
+                                    content_count: '',
+                                    content_weight: ing.items_per_unit || '',
                                   });
                                   setShowSuggestions(false);
                                 }}
                               >
                                 <div className="font-medium text-gray-900 dark:text-gray-100">{ing.name}</div>
-                                <div className="text-xs text-gray-500">{ing.category} • Rp {ing.unit_price.toLocaleString('id-ID')} / {ing.unit}</div>
+                                <div className="text-xs text-gray-500">
+                                  {ing.category} • Rp {ing.unit_price.toLocaleString('id-ID')} / {ing.unit}
+                                  {ing.items_per_unit ? ` · ${ing.items_per_unit}${ing.base_unit}/${ing.unit}` : ''}
+                                </div>
                               </div>
                             ))}
                         </div>
@@ -360,7 +789,14 @@ export default function ModalBahan() {
                         />
                         <select
                           value={currentItem.unit}
-                          onChange={(e) => setCurrentItem({...currentItem, unit: e.target.value})}
+                          onChange={(e) => setCurrentItem({
+                            ...currentItem,
+                            unit: e.target.value,
+                            content_count: '',
+                            content_weight: '',
+                            items_per_unit: '',
+                            base_unit: 'gr'
+                          })}
                           className="px-2 bg-gray-100 dark:bg-gray-800 border border-l-0 border-gray-200 dark:border-gray-700 rounded-r-lg text-sm outline-none"
                         >
                           <option value="kg">kg</option>
@@ -368,16 +804,61 @@ export default function ModalBahan() {
                           <option value="liter">liter</option>
                           <option value="ml">ml</option>
                           <option value="pcs">pcs</option>
+                          <option value="lembar">lembar</option>
                           <option value="bungkus">bungkus</option>
                           <option value="botol">botol</option>
                           <option value="kaleng">kaleng</option>
                           <option value="pack">pack</option>
                         </select>
                       </div>
+
+                      {/* Field isi per kemasan — muncul untuk satuan non-dasar */}
+                      {!['kg', 'gr', 'liter', 'ml'].includes(currentItem.unit) && (
+                        <div className="mt-2 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg space-y-2">
+                          <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
+                            Isi per {currentItem.unit} <span className="font-normal">(opsional, untuk kalkulasi HPP)</span>
+                          </p>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <input
+                              type="number" min="1" step="1"
+                              placeholder="jml isi"
+                              value={currentItem.content_count}
+                              onChange={(e) => setCurrentItem({ ...currentItem, content_count: e.target.value })}
+                              className="w-20 px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs focus:border-primary-500 outline-none"
+                            />
+                            <span className="text-xs text-amber-600 dark:text-amber-400">×</span>
+                            <input
+                              type="number" min="0.1" step="0.1"
+                              placeholder="berat/vol"
+                              value={currentItem.content_weight}
+                              onChange={(e) => setCurrentItem({ ...currentItem, content_weight: e.target.value })}
+                              className="w-24 px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs focus:border-primary-500 outline-none"
+                            />
+                            <select
+                              value={currentItem.base_unit}
+                              onChange={(e) => setCurrentItem({ ...currentItem, base_unit: e.target.value })}
+                              className="px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs outline-none"
+                            >
+                              <option value="gr">gr</option>
+                              <option value="ml">ml</option>
+                              <option value="pcs">pcs</option>
+                            </select>
+                            {/* Preview total */}
+                            {currentItem.content_weight && (
+                              <span className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                                = {computeItemsPerUnit(currentItem.content_count, currentItem.content_weight)}{currentItem.base_unit}/{currentItem.unit}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-amber-600 dark:text-amber-500">
+                            Cth: My Vla → 6 × 60 gr &nbsp;|&nbsp; Susu UHT → × 1000 ml &nbsp;|&nbsp; Cup → × 100 pcs &nbsp;|&nbsp; Stiker → × 96 pcs
+                          </p>
+                        </div>
+                      )}
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Harga Satuan</label>
-                      <input 
+                      <input
                         type="text" required placeholder="12.000"
                         value={currentItem.unit_price ? currentItem.unit_price.toLocaleString('id-ID') : ''}
                         onChange={(e) => {
@@ -390,6 +871,14 @@ export default function ModalBahan() {
                         }}
                         className="w-full px-4 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:border-primary-500 outline-none"
                       />
+                      {currentItem.content_weight && !['kg','gr','liter','ml'].includes(currentItem.unit) && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                          HPP: Rp{currentItem.unit_price} ÷ {computeItemsPerUnit(currentItem.content_count, currentItem.content_weight)}{currentItem.base_unit}
+                          {' = '}Rp{currentItem.unit_price && currentItem.content_weight
+                            ? (currentItem.unit_price / computeItemsPerUnit(currentItem.content_count, currentItem.content_weight)).toFixed(1)
+                            : '?'}/{currentItem.base_unit}
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -422,7 +911,12 @@ export default function ModalBahan() {
                           <tr key={item.id} className="bg-white dark:bg-gray-900">
                             <td className="p-3">
                               <div className="font-medium text-gray-900 dark:text-gray-100">{item.name}</div>
-                              <div className="text-xs text-gray-500">Rp {item.unit_price.toLocaleString('id-ID')} / {item.unit}</div>
+                              <div className="text-xs text-gray-500">
+                                Rp {item.unit_price.toLocaleString('id-ID')} / {item.unit}
+                                {item.items_per_unit
+                                  ? ` · ${item.content_count ? `${item.content_count}×${item.content_weight}` : item.items_per_unit}${item.base_unit}/${item.unit}`
+                                  : ''}
+                              </div>
                             </td>
                             <td className="p-3 text-right text-gray-700 dark:text-gray-300">{item.quantity} {item.unit}</td>
                             <td className="p-3 text-right font-medium text-gray-900 dark:text-gray-100">Rp {(item.quantity * item.unit_price).toLocaleString('id-ID')}</td>
@@ -449,6 +943,129 @@ export default function ModalBahan() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Edit Bahan */}
+      {isEditModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 sm:p-6 bg-black/50 backdrop-blur-sm overflow-y-auto">
+          <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 w-full max-w-lg my-8 sm:my-auto h-fit">
+            <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800 sticky top-0 bg-white dark:bg-gray-900 rounded-t-2xl z-10">
+              <h2 className="text-lg font-bold text-gray-900 dark:text-white">Edit Pembelian Bahan</h2>
+              <button onClick={() => setIsEditModalOpen(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                <X size={20} />
+              </button>
+            </div>
+            <form onSubmit={handleEditSave} className="p-4 space-y-4">
+              {error && (
+                <div className="p-3 bg-red-50 text-red-600 rounded-xl text-sm flex gap-2">
+                  <AlertCircle size={18} /> {error}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Nama Bahan</label>
+                  <input type="text" required value={editFormData.name}
+                    onChange={(e) => setEditFormData({...editFormData, name: e.target.value})}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Kategori</label>
+                  <input type="text" required value={editFormData.category}
+                    onChange={(e) => setEditFormData({...editFormData, category: e.target.value})}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Supplier / Toko</label>
+                  <input type="text" placeholder="Toko Berkah" value={editFormData.supplier}
+                    onChange={(e) => setEditFormData({...editFormData, supplier: e.target.value})}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Tanggal Beli</label>
+                  <input type="date" required value={editFormData.purchase_date}
+                    onChange={(e) => setEditFormData({...editFormData, purchase_date: e.target.value})}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jumlah</label>
+                  <div className="flex">
+                    <input type="number" min="0.1" step="0.1" required value={editFormData.quantity}
+                      onChange={(e) => setEditFormData({...editFormData, quantity: parseFloat(e.target.value) || 1})}
+                      className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-l-xl text-sm focus:border-primary-500 outline-none" />
+                    <select value={editFormData.unit}
+                      onChange={(e) => setEditFormData({...editFormData, unit: e.target.value, content_count: '', content_weight: '', items_per_unit: '', base_unit: 'gr'})}
+                      className="px-2 bg-gray-100 dark:bg-gray-800 border border-l-0 border-gray-200 dark:border-gray-700 rounded-r-xl text-sm outline-none">
+                      <option value="kg">kg</option>
+                      <option value="gr">gr</option>
+                      <option value="liter">liter</option>
+                      <option value="ml">ml</option>
+                      <option value="pcs">pcs</option>
+                      <option value="lembar">lembar</option>
+                      <option value="bungkus">bungkus</option>
+                      <option value="botol">botol</option>
+                      <option value="kaleng">kaleng</option>
+                      <option value="pack">pack</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Harga Satuan</label>
+                  <input type="text" required
+                    value={editFormData.unit_price ? editFormData.unit_price.toLocaleString('id-ID') : ''}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/\./g, '');
+                      if (raw === '') setEditFormData({...editFormData, unit_price: ''});
+                      else if (/^\d+$/.test(raw)) setEditFormData({...editFormData, unit_price: parseInt(raw)});
+                    }}
+                    className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none" />
+                </div>
+              </div>
+
+              {!['kg', 'gr', 'liter', 'ml'].includes(editFormData.unit) && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl space-y-2">
+                  <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
+                    Isi per {editFormData.unit} <span className="font-normal">(opsional, untuk kalkulasi HPP)</span>
+                  </p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input type="number" min="1" step="1" placeholder="jml isi" value={editFormData.content_count}
+                      onChange={(e) => setEditFormData({...editFormData, content_count: e.target.value})}
+                      className="w-20 px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs focus:border-primary-500 outline-none" />
+                    <span className="text-xs text-amber-600 dark:text-amber-400">×</span>
+                    <input type="number" min="0.1" step="0.1" placeholder="berat/vol" value={editFormData.content_weight}
+                      onChange={(e) => setEditFormData({...editFormData, content_weight: e.target.value})}
+                      className="w-24 px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs focus:border-primary-500 outline-none" />
+                    <select value={editFormData.base_unit}
+                      onChange={(e) => setEditFormData({...editFormData, base_unit: e.target.value})}
+                      className="px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs outline-none">
+                      <option value="gr">gr</option>
+                      <option value="ml">ml</option>
+                      <option value="pcs">pcs</option>
+                    </select>
+                    {editFormData.content_weight && (
+                      <span className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                        = {computeItemsPerUnit(editFormData.content_count, editFormData.content_weight)}{editFormData.base_unit}/{editFormData.unit}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-2">
+                <button type="submit" disabled={formLoading}
+                  className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2.5 rounded-xl text-sm font-medium transition-colors shadow-sm disabled:opacity-70">
+                  {formLoading ? <Loader2 className="animate-spin" size={18} /> : 'Simpan Perubahan'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"d:\\\\Pindah X550JX\\\\Projek Portofolio\\\\project-database-penjualan\" -Recurse -File)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "PowerShell(Get-ChildItem -Path \"d:\\\\Pindah X550JX\\\\Projek Portofolio\\\\project-database-penjualan\" -Recurse -File -Exclude node_modules | Where-Object { $_.FullName -notmatch \"node_modules\" } | Select-Object -ExpandProperty FullName | Sort-Object)"
+    ]
+  }
+}

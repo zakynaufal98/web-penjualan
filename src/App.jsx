@@ -9,6 +9,8 @@ import Pengaturan from './pages/Pengaturan';
 import Profil from './pages/Profil';
 import Login from './pages/Login';
 import KalkulatorHPP from './pages/KalkulatorHPP';
+import Produksi from './pages/Produksi';
+import Resep from './pages/Resep';
 import AuthRoute from './components/AuthRoute';
 
 export default function App() {
@@ -23,6 +25,8 @@ export default function App() {
           <Route path="modal" element={<ModalBahan />} />
           <Route path="produk" element={<Produk />} />
           <Route path="hpp" element={<KalkulatorHPP />} />
+          <Route path="produksi" element={<Produksi />} />
+          <Route path="resep" element={<Resep />} />
           <Route path="laporan" element={<Laporan />} />
           <Route path="pengaturan" element={<Pengaturan />} />
           <Route path="profil" element={<Profil />} />

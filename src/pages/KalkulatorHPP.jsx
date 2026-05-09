@@ -1,26 +1,179 @@
 import { useState, useEffect } from 'react';
 import { Calculator, Plus, Trash2, Save, ArrowRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import Toast from '../components/ui/Toast';
+
+const DRAFT_KEY = 'hpp_draft';
+
+const loadDraft = () => {
+  try {
+    const saved = localStorage.getItem(DRAFT_KEY);
+    return saved ? JSON.parse(saved) : null;
+  } catch {
+    return null;
+  }
+};
 
 export default function KalkulatorHPP() {
+  const draft = loadDraft();
+
   const [ingredients, setIngredients] = useState([]);
-  const [recipeName, setRecipeName] = useState('');
-  const [recipeItems, setRecipeItems] = useState([
-    { id: Date.now(), ingredient_id: '', used_qty: 0, used_unit: 'gr' }
-  ]);
-  const [margin, setMargin] = useState(50); // Default 50% margin
+  const [products, setProducts] = useState([]);
+  const [recipeName, setRecipeName] = useState(draft?.recipeName || '');
+  const [recipeItems, setRecipeItems] = useState(
+    draft?.recipeItems?.length
+      ? draft.recipeItems
+      : [{ id: Date.now(), ingredient_id: '', used_qty: '', used_unit: 'gr' }]
+  );
+  const [margin, setMargin] = useState(draft?.margin ?? 50);
+  const [overhead, setOverhead] = useState(draft?.overhead ?? 5);
+  const [batchSize, setBatchSize] = useState(draft?.batchSize ?? 1);
+  const [selectedProductId, setSelectedProductId] = useState(draft?.selectedProductId || '');
+  const [isSaving, setIsSaving] = useState(false);
+  const [toast, setToast] = useState({ message: '', type: 'success' });
 
   useEffect(() => {
     fetchIngredients();
+    fetchProducts();
   }, []);
 
+  // Auto-save draft ke localStorage setiap ada perubahan
+  useEffect(() => {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ recipeName, recipeItems, margin, overhead, batchSize, selectedProductId }));
+  }, [recipeName, recipeItems, margin, overhead, batchSize, selectedProductId]);
+
+  const clearDraft = () => {
+    setRecipeName('');
+    setRecipeItems([{ id: Date.now(), ingredient_id: '', used_qty: '', used_unit: 'gr' }]);
+    setMargin(50);
+    setOverhead(5);
+    setBatchSize(1);
+    // selectedProductId sengaja tidak di-reset agar tidak perlu pilih ulang
+  };
+
   const fetchIngredients = async () => {
-    const { data } = await supabase.from('ingredients').select('*').order('name');
-    if (data) setIngredients(data);
+    const { data } = await supabase
+      .from('ingredients')
+      .select('*')
+      .order('purchase_date', { ascending: false });
+    if (!data) return;
+
+    // Group by name, hitung weighted average price dari semua pembelian semua toko
+    const groups = {};
+    data.forEach(ing => {
+      const key = ing.name.trim().toLowerCase();
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(ing);
+    });
+
+    const averaged = Object.values(groups).map(entries => {
+      const template = entries[0];
+      if (entries.length === 1) return { ...template, _purchaseCount: 1 };
+
+      let totalCost = 0;
+      let totalQtyBase = 0;
+      entries.forEach(ing => {
+        let pricePerBase, qtyBase;
+        if (ing.items_per_unit && ing.base_unit) {
+          pricePerBase = ing.unit_price / ing.items_per_unit;
+          qtyBase = ing.quantity * ing.items_per_unit;
+        } else if (ing.unit === 'kg') {
+          pricePerBase = ing.unit_price / 1000;
+          qtyBase = ing.quantity * 1000;
+        } else if (ing.unit === 'liter') {
+          pricePerBase = ing.unit_price / 1000;
+          qtyBase = ing.quantity * 1000;
+        } else {
+          pricePerBase = ing.unit_price;
+          qtyBase = ing.quantity;
+        }
+        totalCost += pricePerBase * qtyBase;
+        totalQtyBase += qtyBase;
+      });
+
+      const avgPricePerBase = totalQtyBase > 0 ? totalCost / totalQtyBase : 0;
+      let avgUnitPrice;
+      if (template.items_per_unit && template.base_unit) {
+        avgUnitPrice = avgPricePerBase * template.items_per_unit;
+      } else if (template.unit === 'kg' || template.unit === 'liter') {
+        avgUnitPrice = avgPricePerBase * 1000;
+      } else {
+        avgUnitPrice = avgPricePerBase;
+      }
+
+      return { ...template, unit_price: avgUnitPrice, _purchaseCount: entries.length };
+    });
+
+    setIngredients(averaged);
+  };
+
+  const fetchProducts = async () => {
+    const { data } = await supabase.from('products').select('id, name').order('name');
+    if (data) setProducts(data);
+  };
+
+  const handleSaveToProduct = async () => {
+    if (!selectedProductId || hppPerUnit === 0) return;
+    const { error } = await supabase
+      .from('products')
+      .update({ cost_price: Math.round(hppPerUnit), overhead_pct: overhead })
+      .eq('id', selectedProductId);
+    if (error) {
+      setToast({ message: 'Gagal menyimpan HPP, coba lagi.', type: 'error' });
+    } else {
+      setToast({ message: 'HPP berhasil disimpan ke produk!', type: 'success' });
+      clearDraft();
+    }
+  };
+
+  const handleSaveHPPAndRecipe = async () => {
+    if (!selectedProductId || hppPerUnit === 0) return;
+    setIsSaving(true);
+
+    // 1. Simpan HPP ke produk
+    const { error: hppError } = await supabase
+      .from('products')
+      .update({ cost_price: Math.round(hppPerUnit), overhead_pct: overhead })
+      .eq('id', selectedProductId);
+    if (hppError) {
+      setToast({ message: 'Gagal menyimpan HPP, coba lagi.', type: 'error' });
+      setIsSaving(false);
+      return;
+    }
+
+    // 2. Ambil semua ingredient_masters sekaligus untuk mapping nama → id
+    const { data: masters } = await supabase.from('ingredient_masters').select('id, name');
+    const masterMap = {};
+    (masters || []).forEach(m => { masterMap[m.name.trim().toLowerCase()] = m.id; });
+
+    // 3. Hapus resep lama lalu insert yang baru
+    await supabase.from('recipes').delete().eq('product_id', selectedProductId);
+
+    const validItems = recipeItems.filter(i => i.ingredient_id && parseFloat(i.used_qty) > 0);
+    const insertData = validItems.map(item => {
+      const ing = ingredients.find(i => i.id === item.ingredient_id);
+      if (!ing) return null;
+      const masterId = masterMap[ing.name.trim().toLowerCase()];
+      if (!masterId) return null;
+      return {
+        product_id: selectedProductId,
+        ingredient_master_id: masterId,
+        quantity_per_unit: parseFloat(item.used_qty) / (batchSize || 1),
+        unit: item.used_unit
+      };
+    }).filter(Boolean);
+
+    if (insertData.length > 0) {
+      await supabase.from('recipes').insert(insertData);
+    }
+
+    setToast({ message: 'HPP & resep berhasil disimpan ke produk!', type: 'success' });
+    clearDraft();
+    setIsSaving(false);
   };
 
   const handleAddItem = () => {
-    setRecipeItems([...recipeItems, { id: Date.now(), ingredient_id: '', used_qty: 0, used_unit: 'gr' }]);
+    setRecipeItems([...recipeItems, { id: Date.now(), ingredient_id: '', used_qty: '', used_unit: 'gr' }]);
   };
 
   const handleRemoveItem = (id) => {
@@ -31,36 +184,46 @@ export default function KalkulatorHPP() {
     setRecipeItems(recipeItems.map(item => item.id === id ? { ...item, [field]: value } : item));
   };
 
-  // Unit conversion to a base common unit (assuming base is gram/ml)
+  // Hitung harga per satuan dasar (gr atau ml) dari data pembelian
   const getNormalizedPricePerUnit = (ingredient, targetUnit) => {
     if (!ingredient) return 0;
-    
-    // Normalize purchase quantity to grams or ml
-    let purchaseQtyInBase = ingredient.quantity;
+
+    // Kasus 1: beli per kemasan (pack/bungkus/botol/kaleng) dengan isi yang diketahui
+    // Contoh: 1 pack santan 65ml → items_per_unit=65, base_unit='ml'
+    if (ingredient.items_per_unit && ingredient.base_unit) {
+      const pricePerBase = ingredient.unit_price / ingredient.items_per_unit;
+      if (targetUnit === 'kg' || targetUnit === 'liter') return pricePerBase * 1000;
+      return pricePerBase;
+    }
+
+    // Kasus 2: beli per kg atau liter → konversi ke gr/ml
+    // unit_price adalah harga PER UNIT (bukan total), jadi jangan dibagi quantity
     if (ingredient.unit === 'kg' || ingredient.unit === 'liter') {
-      purchaseQtyInBase = ingredient.quantity * 1000;
+      const pricePerBase = ingredient.unit_price / 1000;
+      if (targetUnit === 'kg' || targetUnit === 'liter') return ingredient.unit_price;
+      return pricePerBase;
     }
 
-    const pricePerBaseUnit = ingredient.unit_price / purchaseQtyInBase;
-
-    // Convert to requested unit
-    if (targetUnit === 'kg' || targetUnit === 'liter') {
-      return pricePerBaseUnit * 1000;
-    }
-    return pricePerBaseUnit; // for gr, ml, pcs
+    // Kasus 3: beli per gr, ml, pcs — langsung pakai unit_price
+    if (targetUnit === 'kg' || targetUnit === 'liter') return ingredient.unit_price * 1000;
+    return ingredient.unit_price;
   };
 
   const calculateRowCost = (item) => {
-    if (!item.ingredient_id || !item.used_qty) return 0;
+    const qty = parseFloat(item.used_qty);
+    if (!item.ingredient_id || !qty) return 0;
     const ing = ingredients.find(i => i.id === item.ingredient_id);
     if (!ing) return 0;
 
     const pricePerUnit = getNormalizedPricePerUnit(ing, item.used_unit);
-    return pricePerUnit * item.used_qty;
+    return pricePerUnit * qty;
   };
 
   const totalHPP = recipeItems.reduce((acc, item) => acc + calculateRowCost(item), 0);
-  const suggestedPrice = totalHPP + (totalHPP * (margin / 100));
+  const overheadAmount = totalHPP * ((overhead || 0) / 100);
+  const totalHPPWithOverhead = totalHPP + overheadAmount;
+  const hppPerUnit = totalHPPWithOverhead / (batchSize || 1);
+  const suggestedPrice = hppPerUnit + (hppPerUnit * (margin / 100));
 
   return (
     <div className="space-y-6">
@@ -69,20 +232,40 @@ export default function KalkulatorHPP() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-50">Kalkulator HPP</h1>
           <p className="text-gray-500 dark:text-gray-400 mt-1">Hitung Harga Pokok Penjualan berdasarkan gramasi resep.</p>
         </div>
+        {(recipeName || recipeItems.some(i => i.ingredient_id || i.used_qty)) && (
+          <button
+            onClick={() => { if (confirm('Reset semua input kalkulator?')) clearDraft(); }}
+            className="flex items-center gap-2 text-sm text-gray-400 hover:text-red-500 transition-colors"
+          >
+            <Trash2 size={15} /> Reset Kalkulator
+          </button>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 p-6">
-            <div className="mb-6">
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Nama Resep / Produk</label>
-              <input 
-                type="text" 
-                placeholder="Cth: Resep Brownies 1 Loyang"
-                value={recipeName}
-                onChange={(e) => setRecipeName(e.target.value)}
-                className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none transition-colors"
-              />
+            <div className="mb-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Nama Resep / Produk</label>
+                <input
+                  type="text"
+                  placeholder="Cth: Resep Brownies 1 Loyang"
+                  value={recipeName}
+                  onChange={(e) => setRecipeName(e.target.value)}
+                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none transition-colors"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Dihasilkan (pcs)</label>
+                <input
+                  type="number" min="1" step="1"
+                  value={batchSize}
+                  onChange={(e) => setBatchSize(e.target.value === '' ? 1 : parseInt(e.target.value) || 1)}
+                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none transition-colors"
+                />
+                <p className="text-xs text-gray-400 mt-1">Resep ini menghasilkan berapa pcs?</p>
+              </div>
             </div>
 
             <div className="space-y-4">
@@ -108,31 +291,32 @@ export default function KalkulatorHPP() {
                       <option value="">-- Pilih Bahan --</option>
                       {ingredients.map(ing => (
                         <option key={ing.id} value={ing.id}>
-                          {ing.name} (Rp {ing.unit_price.toLocaleString('id-ID')} / {ing.quantity}{ing.unit})
+                          {ing.name} - Rp {Math.round(ing.unit_price).toLocaleString('id-ID')}/{ing.unit}{ing._purchaseCount > 1 ? ` (rata-rata ${ing._purchaseCount} pembelian)` : ''}
                         </option>
                       ))}
                     </select>
                   </div>
                   
-                  <div className="w-full sm:w-32">
+                  <div className="w-full sm:w-52">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Gramasi/Jumlah</label>
                     <div className="flex">
                       <input
-                        type="number" min="0" step="0.1"
+                        type="number" min="0" step="any"
                         value={item.used_qty}
-                        onChange={(e) => handleItemChange(item.id, 'used_qty', e.target.value === '' ? '' : parseFloat(e.target.value) || 0)}
-                        className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-l-lg text-sm focus:border-primary-500 outline-none"
+                        onChange={(e) => handleItemChange(item.id, 'used_qty', e.target.value)}
+                        className="w-full min-w-0 px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-l-lg text-sm focus:border-primary-500 outline-none"
                       />
                       <select
                         value={item.used_unit}
                         onChange={(e) => handleItemChange(item.id, 'used_unit', e.target.value)}
-                        className="px-2 bg-gray-100 dark:bg-gray-800 border border-l-0 border-gray-200 dark:border-gray-700 rounded-r-lg text-sm outline-none"
+                        className="shrink-0 w-20 px-1 bg-gray-100 dark:bg-gray-800 border border-l-0 border-gray-200 dark:border-gray-700 rounded-r-lg text-sm outline-none"
                       >
                         <option value="gr">gr</option>
                         <option value="kg">kg</option>
                         <option value="ml">ml</option>
                         <option value="liter">L</option>
                         <option value="pcs">pcs</option>
+                        <option value="lembar">lembar</option>
                         <option value="bungkus">bungkus</option>
                         <option value="botol">botol</option>
                         <option value="kaleng">kaleng</option>
@@ -171,10 +355,76 @@ export default function KalkulatorHPP() {
             </div>
 
             <div className="space-y-4">
+              {/* Rincian per bahan */}
+              {totalHPP > 0 && (
+                <div className="space-y-2">
+                  {recipeItems.filter(item => calculateRowCost(item) > 0).map(item => {
+                    const ing = ingredients.find(i => i.id === item.ingredient_id);
+                    const cost = calculateRowCost(item);
+                    const pct = totalHPP > 0 ? (cost / totalHPP) * 100 : 0;
+                    return (
+                      <div key={item.id}>
+                        <div className="flex justify-between items-center text-xs mb-0.5">
+                          <span className="text-gray-600 dark:text-gray-400 truncate max-w-[60%]">{ing?.name ?? '—'}</span>
+                          <span className="text-gray-700 dark:text-gray-300 font-medium shrink-0">
+                            Rp {Math.round(cost).toLocaleString('id-ID')}
+                            <span className="text-gray-400 ml-1">({Math.round(pct)}%)</span>
+                          </span>
+                        </div>
+                        <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-1.5">
+                          <div
+                            className="bg-primary-400 dark:bg-primary-500 h-1.5 rounded-full"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {overheadAmount > 0 && (
+                    <div>
+                      <div className="flex justify-between items-center text-xs mb-0.5">
+                        <span className="text-amber-600 dark:text-amber-400">Overhead ({overhead}%)</span>
+                        <span className="text-amber-600 dark:text-amber-400 font-medium">
+                          Rp {Math.round(overheadAmount).toLocaleString('id-ID')}
+                          <span className="text-amber-400/70 ml-1">({Math.round((overheadAmount / totalHPPWithOverhead) * 100)}%)</span>
+                        </span>
+                      </div>
+                      <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-1.5">
+                        <div
+                          className="bg-amber-400 dark:bg-amber-500 h-1.5 rounded-full"
+                          style={{ width: `${(overheadAmount / totalHPPWithOverhead) * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <div className="border-t border-gray-100 dark:border-gray-800 pt-2" />
+                </div>
+              )}
+
               <div className="flex justify-between items-center">
-                <span className="text-sm text-gray-500">Total HPP (Modal)</span>
-                <span className="text-lg font-bold text-gray-900 dark:text-white">
-                  Rp {Math.round(totalHPP).toLocaleString('id-ID')}
+                <span className="text-sm text-gray-500">Total HPP (1 resep)</span>
+                <span className="font-semibold text-gray-700 dark:text-gray-300">
+                  Rp {Math.round(totalHPPWithOverhead).toLocaleString('id-ID')}
+                </span>
+              </div>
+
+              <div>
+                <label className="flex justify-between items-center text-sm text-gray-500 mb-2">
+                  <span>Overhead <span className="text-xs text-gray-400">(gas, air, listrik, dll)</span></span>
+                  <span className="font-medium text-amber-600 dark:text-amber-400">{overhead}%</span>
+                </label>
+                <input
+                  type="range" min="0" max="30" step="1"
+                  value={overhead}
+                  onChange={(e) => setOverhead(parseInt(e.target.value))}
+                  className="w-full accent-amber-500"
+                />
+              </div>
+
+              <div className="flex justify-between items-center p-3 bg-primary-50 dark:bg-primary-900/20 rounded-xl">
+                <span className="text-sm font-medium text-primary-700 dark:text-primary-300">HPP per unit ({batchSize} pcs)</span>
+                <span className="text-lg font-bold text-primary-700 dark:text-primary-300">
+                  Rp {Math.round(hppPerUnit).toLocaleString('id-ID')}
                 </span>
               </div>
 
@@ -183,7 +433,7 @@ export default function KalkulatorHPP() {
                   <span>Target Margin Keuntungan</span>
                   <span className="font-medium text-primary-600 dark:text-primary-400">{margin}%</span>
                 </label>
-                <input 
+                <input
                   type="range" min="0" max="200" step="5"
                   value={margin}
                   onChange={(e) => setMargin(e.target.value === '' ? '' : parseInt(e.target.value))}
@@ -192,22 +442,63 @@ export default function KalkulatorHPP() {
               </div>
 
               <div className="pt-4 border-t border-gray-100 dark:border-gray-800">
-                <span className="block text-sm text-gray-500 mb-1">Saran Harga Jual</span>
+                <span className="block text-sm text-gray-500 mb-1">Saran Harga Jual / pcs</span>
                 <span className="block text-3xl font-bold text-emerald-600 dark:text-emerald-400">
                   Rp {Math.round(suggestedPrice).toLocaleString('id-ID')}
                 </span>
-                <span className="block text-xs text-gray-400 mt-1">Potensi untung: Rp {Math.round(suggestedPrice - totalHPP).toLocaleString('id-ID')} / resep</span>
+                <span className="block text-xs text-gray-400 mt-1">
+                  Potensi untung: Rp {Math.round(suggestedPrice - hppPerUnit).toLocaleString('id-ID')} / pcs
+                  {batchSize > 1 && ` · Rp ${Math.round((suggestedPrice - hppPerUnit) * batchSize).toLocaleString('id-ID')} / resep`}
+                </span>
               </div>
             </div>
 
-            <div className="mt-8">
-              <button className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-3 rounded-xl text-sm font-medium transition-colors shadow-sm shadow-primary-600/20">
-                <Save size={18} /> Simpan ke Produk
+            <div className="mt-8 space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Simpan HPP ke Produk</label>
+                <select
+                  value={selectedProductId}
+                  onChange={(e) => {
+                    setSelectedProductId(e.target.value);
+                    const p = products.find(p => p.id === e.target.value);
+                    if (p) setRecipeName(p.name);
+                  }}
+                  className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                >
+                  <option value="">-- Pilih Produk --</option>
+                  {products.map(p => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                onClick={handleSaveHPPAndRecipe}
+                disabled={!selectedProductId || hppPerUnit === 0 || isSaving}
+                className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-3 rounded-xl text-sm font-medium transition-colors shadow-sm shadow-primary-600/20"
+              >
+                {isSaving
+                  ? <><ArrowRight size={18} className="animate-pulse" /> Menyimpan...</>
+                  : <><Save size={18} /> Simpan HPP + Resep ke Produk</>}
+              </button>
+
+              <button
+                onClick={handleSaveToProduct}
+                disabled={!selectedProductId || hppPerUnit === 0 || isSaving}
+                className="w-full flex items-center justify-center gap-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 py-2 rounded-xl text-xs font-medium transition-colors"
+              >
+                <Save size={14} /> HPP saja (tanpa update resep)
               </button>
             </div>
           </div>
         </div>
       </div>
+
+      <Toast
+        message={toast.message}
+        type={toast.type}
+        onClose={() => setToast({ message: '', type: 'success' })}
+      />
     </div>
   );
 }

@@ -1,22 +1,25 @@
 import { NavLink } from 'react-router-dom';
 import { useStore } from '../../store/useStore';
-import { 
-  LayoutDashboard, 
-  ShoppingCart, 
-  Package, 
-  PieChart, 
-  Settings, 
-  User,
+import {
+  LayoutDashboard,
+  ShoppingCart,
+  Package,
+  PieChart,
+  Settings,
   Menu,
   Wallet,
-  Calculator
+  Calculator,
+  ClipboardList,
+  BookOpen
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 const navItems = [
   { name: 'Dashboard', path: '/', icon: LayoutDashboard },
   { name: 'Penjualan', path: '/penjualan', icon: ShoppingCart },
+  { name: 'Produksi', path: '/produksi', icon: ClipboardList },
   { name: 'Modal Bahan', path: '/modal', icon: Wallet },
+  { name: 'Resep', path: '/resep', icon: BookOpen },
   { name: 'Produk', path: '/produk', icon: Package },
   { name: 'Hitung HPP', path: '/hpp', icon: Calculator },
   { name: 'Laporan', path: '/laporan', icon: PieChart },
@@ -39,7 +42,7 @@ export default function Sidebar() {
       {/* Sidebar */}
       <aside
         className={cn(
-          "hidden md:flex flex-col inset-y-0 left-0 z-30 w-64 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 transition-transform duration-300 ease-in-out",
+          "hidden md:flex flex-col inset-y-0 left-0 z-30 w-64 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 transition-all duration-300 ease-in-out",
           sidebarOpen ? "w-64" : "w-20"
         )}
       >
@@ -47,7 +50,7 @@ export default function Sidebar() {
           <div className={cn("font-bold text-xl text-primary-600 dark:text-primary-400 truncate transition-all", !sidebarOpen && "lg:hidden")}>
             CakeFinance
           </div>
-          <button 
+          <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
             className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 lg:hidden"
           >
@@ -64,12 +67,12 @@ export default function Sidebar() {
                 to={item.path}
                 className={({ isActive }) => cn(
                   "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 group",
-                  isActive 
-                    ? "bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400 font-medium" 
+                  isActive
+                    ? "bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400 font-medium"
                     : "text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100"
                 )}
               >
-                <Icon size={22} className={cn("shrink-0")} />
+                <Icon size={22} className="shrink-0" />
                 <span className={cn("transition-opacity duration-200", !sidebarOpen && "lg:hidden")}>
                   {item.name}
                 </span>
