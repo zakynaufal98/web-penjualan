@@ -3,6 +3,8 @@ import { Search, Plus, Filter, MoreVertical, Edit2, Trash2, X, Loader2, AlertCir
 import { supabase } from '../lib/supabase';
 import { useStore } from '../store/useStore';
 import Toast from '../components/ui/Toast';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
+import { friendlyError } from '../lib/errorUtils';
 
 export default function Penjualan() {
   const [searchTerm, setSearchTerm] = useState('');
@@ -22,6 +24,9 @@ export default function Penjualan() {
   const [formLoading, setFormLoading] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState({ message: '', type: 'success' });
+  const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null });
+  const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
+  const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
   const { user } = useStore();
 
   useEffect(() => {
@@ -82,21 +87,26 @@ export default function Penjualan() {
     const selectedProduct = products.find(p => p.id === formData.product_id);
     if (!selectedProduct) return;
 
+    if (!editingTransaction && selectedProduct.stock < formData.quantity) {
+      setError(`Stok ${selectedProduct.name} tidak mencukupi. Tersedia: ${selectedProduct.stock} pcs`);
+      setFormLoading(false);
+      return;
+    }
+
     const payload = {
       product_id: formData.product_id,
       quantity: formData.quantity,
       unit_price: selectedProduct.selling_price,
-      total_price: selectedProduct.selling_price * formData.quantity,
       payment_method: formData.payment_method,
       customer_name: formData.customer_name || null,
     };
 
     const { error: dbError } = editingTransaction
       ? await supabase.from('sales').update(payload).eq('id', editingTransaction.id)
-      : await supabase.from('sales').insert([{ ...payload, created_by: user?.id }]);
+      : await supabase.from('sales').insert([payload]);
 
     if (dbError) {
-      setError(dbError.message);
+      setError(friendlyError(dbError));
     } else {
       setIsModalOpen(false);
       setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '' });
@@ -106,15 +116,17 @@ export default function Penjualan() {
     setFormLoading(false);
   };
 
-  const handleDelete = async (id) => {
-    if (confirm('Yakin ingin menghapus transaksi ini?')) {
-      const { error: delError } = await supabase.from('sales').delete().eq('id', id);
-      if (delError) {
-        setToast({ message: 'Gagal menghapus transaksi.', type: 'error' });
-      } else {
-        setToast({ message: 'Transaksi berhasil dihapus.', type: 'success' });
-        fetchTransactions();
-      }
+  const handleDelete = (id) => {
+    openConfirm('Hapus Transaksi?', 'Data transaksi yang dihapus tidak bisa dikembalikan.', () => executeDelete(id));
+  };
+
+  const executeDelete = async (id) => {
+    const { error: delError } = await supabase.from('sales').delete().eq('id', id);
+    if (delError) {
+      setToast({ message: 'Gagal menghapus transaksi.', type: 'error' });
+    } else {
+      setToast({ message: 'Transaksi berhasil dihapus.', type: 'success' });
+      fetchTransactions();
     }
   };
 
@@ -202,6 +214,7 @@ export default function Penjualan() {
       </div>
 
       <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
+      <ConfirmDialog isOpen={confirmDialog.open} title={confirmDialog.title} message={confirmDialog.message} onConfirm={() => { closeConfirm(); confirmDialog.onConfirm?.(); }} onCancel={closeConfirm} />
 
       {/* Modal Tambah */}
       {isModalOpen && (

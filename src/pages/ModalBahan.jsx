@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { Search, Plus, Trash2, X, Loader2, AlertCircle, Camera, Image as ImageIcon, TrendingDown, TrendingUp, Minus, Lightbulb, BarChart2, Edit2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
+import { friendlyError } from '../lib/errorUtils';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
 import { uploadToImgBB } from '../lib/uploadImgBB';
 import { format } from 'date-fns';
 import { id as localeId } from 'date-fns/locale';
@@ -29,7 +31,7 @@ export default function ModalBahan() {
     category: '',
     quantity: 1,
     unit: 'kg',
-    unit_price: 0,
+    unit_price: '',
     content_count: '',   // berapa isi per kemasan (cth: 6 sachet) — UI only
     content_weight: '',  // berat/volume per isi (cth: 60gr) — UI only
     items_per_unit: '',  // total yang disimpan ke DB = content_count × content_weight
@@ -50,6 +52,9 @@ export default function ModalBahan() {
   const [uploadFailed, setUploadFailed] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState({ message: '', type: 'success' });
+  const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null });
+  const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
+  const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
 
   useEffect(() => {
     fetchIngredients();
@@ -88,7 +93,7 @@ export default function ModalBahan() {
 
     const computed = computeItemsPerUnit(currentItem.content_count, currentItem.content_weight);
     setCart([...cart, { ...currentItem, items_per_unit: computed, id: Date.now() }]);
-    setCurrentItem({ name: '', category: '', quantity: 1, unit: 'kg', unit_price: 0, content_count: '', content_weight: '', items_per_unit: '', base_unit: 'gr' });
+    setCurrentItem({ name: '', category: '', quantity: 1, unit: 'kg', unit_price: '', content_count: '', content_weight: '', items_per_unit: '', base_unit: 'gr' });
   };
 
   const removeFromCart = (id) => {
@@ -120,7 +125,7 @@ export default function ModalBahan() {
     const { error: insertError } = await supabase.from('ingredients').insert(insertData);
 
     if (insertError) {
-      setError(insertError.message);
+      setError(friendlyError(insertError));
       setFormLoading(false);
       return;
     }
@@ -159,35 +164,36 @@ export default function ModalBahan() {
     setFormLoading(false);
   };
 
-  const handleDelete = async (id) => {
-    if (confirm('Yakin ingin menghapus riwayat pembelian ini? Stok bahan akan dikurangi sesuai jumlah pembelian ini.')) {
-      const item = ingredients.find(i => i.id === id);
+  const handleDelete = (id) => {
+    openConfirm(
+      'Hapus Riwayat Pembelian?',
+      'Stok bahan baku akan dikurangi sesuai jumlah pembelian ini.',
+      () => executeDelete(id)
+    );
+  };
 
-      const { error: delError } = await supabase.from('ingredients').delete().eq('id', id);
-      if (delError) {
-        setToast({ message: 'Gagal menghapus data.', type: 'error' });
-        return;
-      }
-
-      // Kurangi stok di ingredient_masters sesuai qty yang dihapus
-      if (item) {
-        const { data: master } = await supabase
-          .from('ingredient_masters')
-          .select('id, current_stock')
-          .eq('name', item.name.trim())
-          .maybeSingle();
-
-        if (master) {
-          await supabase
-            .from('ingredient_masters')
-            .update({ current_stock: Math.max(0, (master.current_stock || 0) - item.quantity) })
-            .eq('id', master.id);
-        }
-      }
-
-      setToast({ message: 'Riwayat pembelian dihapus dan stok dikurangi.', type: 'success' });
-      fetchIngredients();
+  const executeDelete = async (id) => {
+    const item = ingredients.find(i => i.id === id);
+    const { error: delError } = await supabase.from('ingredients').delete().eq('id', id);
+    if (delError) {
+      setToast({ message: 'Gagal menghapus data.', type: 'error' });
+      return;
     }
+    if (item) {
+      const { data: master } = await supabase
+        .from('ingredient_masters')
+        .select('id, current_stock')
+        .eq('name', item.name.trim())
+        .maybeSingle();
+      if (master) {
+        await supabase
+          .from('ingredient_masters')
+          .update({ current_stock: Math.max(0, (master.current_stock || 0) - item.quantity) })
+          .eq('id', master.id);
+      }
+    }
+    setToast({ message: 'Riwayat pembelian dihapus dan stok dikurangi.', type: 'success' });
+    fetchIngredients();
   };
 
   const openEditIngredient = (item) => {
@@ -232,7 +238,7 @@ export default function ModalBahan() {
       .eq('id', editFormData.id);
 
     if (dbError) {
-      setError(dbError.message);
+      setError(friendlyError(dbError));
     } else {
       // Sync ingredient_masters: adjust stok (selisih qty) + update items_per_unit
       const { data: master } = await supabase
@@ -268,6 +274,7 @@ export default function ModalBahan() {
     }
     if (ing.unit === 'kg')    return { price: ing.unit_price / 1000, unit: 'gr' };
     if (ing.unit === 'liter') return { price: ing.unit_price / 1000, unit: 'ml' };
+    if (ing.unit === 'gr' || ing.unit === 'ml') return { price: ing.unit_price / ing.quantity, unit: ing.unit };
     return { price: ing.unit_price, unit: ing.unit };
   };
 
@@ -445,8 +452,15 @@ export default function ModalBahan() {
                     </td>
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">{item.supplier || '-'}</td>
                     <td className="p-4 text-right text-gray-900 dark:text-gray-100 whitespace-nowrap">{item.quantity} {item.unit}</td>
-                    <td className="p-4 text-right text-gray-500 dark:text-gray-400 whitespace-nowrap">Rp {item.unit_price.toLocaleString('id-ID')}</td>
-                    <td className="p-4 text-right font-medium text-red-600 dark:text-red-400 whitespace-nowrap">Rp {(item.quantity * item.unit_price).toLocaleString('id-ID')}</td>
+                    <td className="p-4 text-right text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                      Rp {item.unit_price.toLocaleString('id-ID')}
+                      {['gr','ml'].includes(item.unit) && (
+                        <span className="block text-xs text-gray-400">(total beli)</span>
+                      )}
+                    </td>
+                    <td className="p-4 text-right font-medium text-red-600 dark:text-red-400 whitespace-nowrap">
+                      Rp {(['gr','ml'].includes(item.unit) ? item.unit_price : item.quantity * item.unit_price).toLocaleString('id-ID')}
+                    </td>
                     <td className="p-4 flex items-center gap-1">
                       {item.receipt_url && (
                         <button onClick={() => setSelectedImage(item.receipt_url)} title="Lihat Struk" className="p-2 text-gray-400 hover:text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/20 rounded-lg transition-colors">
@@ -594,6 +608,7 @@ export default function ModalBahan() {
       )} {/* end tab perbandingan */}
 
       <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
+      <ConfirmDialog isOpen={confirmDialog.open} title={confirmDialog.title} message={confirmDialog.message} onConfirm={() => { closeConfirm(); confirmDialog.onConfirm?.(); }} onCancel={closeConfirm} />
 
       {/* Modal Tambah */}
       {isModalOpen && (
@@ -747,7 +762,7 @@ export default function ModalBahan() {
                                     name: ing.name,
                                     category: ing.category,
                                     unit: ing.unit,
-                                    unit_price: ing.unit_price,
+                                    unit_price: ing.unit_price ?? '',
                                     items_per_unit: ing.items_per_unit || '',
                                     base_unit: ing.base_unit || 'gr',
                                     content_count: '',
@@ -857,10 +872,12 @@ export default function ModalBahan() {
                       )}
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Harga Satuan</label>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                        {['gr','ml'].includes(currentItem.unit) ? 'Total Harga Beli' : 'Harga Satuan'}
+                      </label>
                       <input
                         type="text" required placeholder="12.000"
-                        value={currentItem.unit_price ? currentItem.unit_price.toLocaleString('id-ID') : ''}
+                        value={currentItem.unit_price !== '' ? Number(currentItem.unit_price).toLocaleString('id-ID') : ''}
                         onChange={(e) => {
                           const rawValue = e.target.value.replace(/\./g, '');
                           if (rawValue === '') {
@@ -877,6 +894,11 @@ export default function ModalBahan() {
                           {' = '}Rp{currentItem.unit_price && currentItem.content_weight
                             ? (currentItem.unit_price / computeItemsPerUnit(currentItem.content_count, currentItem.content_weight)).toFixed(1)
                             : '?'}/{currentItem.base_unit}
+                        </p>
+                      )}
+                      {['gr','ml'].includes(currentItem.unit) && currentItem.unit_price > 0 && currentItem.quantity > 0 && (
+                        <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                          = Rp {(currentItem.unit_price / currentItem.quantity).toFixed(1)}/{currentItem.unit} untuk HPP
                         </p>
                       )}
                     </div>
@@ -999,7 +1021,7 @@ export default function ModalBahan() {
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jumlah</label>
                   <div className="flex">
                     <input type="number" min="0.1" step="0.1" required value={editFormData.quantity}
-                      onChange={(e) => setEditFormData({...editFormData, quantity: parseFloat(e.target.value) || 1})}
+                      onChange={(e) => setEditFormData({...editFormData, quantity: e.target.value === '' ? '' : parseFloat(e.target.value)})}
                       className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-l-xl text-sm focus:border-primary-500 outline-none" />
                     <select value={editFormData.unit}
                       onChange={(e) => setEditFormData({...editFormData, unit: e.target.value, content_count: '', content_weight: '', items_per_unit: '', base_unit: 'gr'})}
@@ -1018,15 +1040,22 @@ export default function ModalBahan() {
                   </div>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Harga Satuan</label>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                    {['gr','ml'].includes(editFormData.unit) ? 'Total Harga Beli' : 'Harga Satuan'}
+                  </label>
                   <input type="text" required
-                    value={editFormData.unit_price ? editFormData.unit_price.toLocaleString('id-ID') : ''}
+                    value={editFormData.unit_price !== '' ? Number(editFormData.unit_price).toLocaleString('id-ID') : ''}
                     onChange={(e) => {
                       const raw = e.target.value.replace(/\./g, '');
                       if (raw === '') setEditFormData({...editFormData, unit_price: ''});
                       else if (/^\d+$/.test(raw)) setEditFormData({...editFormData, unit_price: parseInt(raw)});
                     }}
                     className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none" />
+                  {['gr','ml'].includes(editFormData.unit) && editFormData.unit_price > 0 && editFormData.quantity > 0 && (
+                    <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                      = Rp {(editFormData.unit_price / editFormData.quantity).toFixed(1)}/{editFormData.unit} untuk HPP
+                    </p>
+                  )}
                 </div>
               </div>
 

@@ -16,21 +16,28 @@ import { Plus, Trash2, X, Loader2, AlertCircle, ClipboardList } from 'lucide-rea
 import { supabase } from '../lib/supabase';
 import { useStore } from '../store/useStore';
 import Toast from '../components/ui/Toast';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
+import { friendlyError } from '../lib/errorUtils';
 import { format, isSameDay } from 'date-fns';
 import { id as localeId } from 'date-fns/locale';
 
 export default function Produksi() {
   const [logs, setLogs] = useState([]);
+  const [salesMap, setSalesMap] = useState({});
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [tableExists, setTableExists] = useState(true);
 
-  const [formData, setFormData] = useState({ product_id: '', quantity: 1, notes: '' });
+  const [formData, setFormData] = useState({ product_id: '', quantity: 1, failed: 0, notes: '' });
   const [formLoading, setFormLoading] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState({ message: '', type: 'success' });
+  const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null });
   const { user } = useStore();
+
+  const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
+  const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
 
   useEffect(() => {
     fetchLogs();
@@ -39,16 +46,23 @@ export default function Produksi() {
 
   const fetchLogs = async () => {
     setLoading(true);
-    const { data, error: fetchError } = await supabase
-      .from('production_logs')
-      .select('*, products(name)')
-      .order('production_date', { ascending: false });
+    const [{ data, error: fetchError }, { data: salesData }] = await Promise.all([
+      supabase.from('production_logs').select('*, products(name)').order('production_date', { ascending: false }),
+      supabase.from('sales').select('product_id, quantity, transaction_date'),
+    ]);
 
     if (fetchError) {
       setTableExists(false);
     } else {
       setLogs(data || []);
       setTableExists(true);
+      // Buat map: "productId_yyyy-MM-dd" → total terjual
+      const map = {};
+      (salesData || []).forEach(s => {
+        const key = `${s.product_id}_${format(new Date(s.transaction_date), 'yyyy-MM-dd')}`;
+        map[key] = (map[key] || 0) + s.quantity;
+      });
+      setSalesMap(map);
     }
     setLoading(false);
   };
@@ -67,40 +81,35 @@ export default function Produksi() {
     return qty;
   };
 
-  const deductIngredientStock = async (productId, batchQty) => {
+  const adjustIngredientStock = async (productId, batchQty, sign) => {
     const { data: recipeItems } = await supabase
       .from('recipes')
-      .select('quantity_per_unit, unit, ingredient_master_id, ingredient_masters(id, unit, current_stock)')
+      .select('quantity_per_unit, unit, ingredient_master_id, ingredient_masters(id, unit, items_per_unit, base_unit)')
       .eq('product_id', productId);
     if (!recipeItems || recipeItems.length === 0) return false;
     for (const item of recipeItems) {
       const master = item.ingredient_masters;
       if (!master) continue;
-      const deductQty = convertUnit(item.quantity_per_unit * batchQty, item.unit, master.unit);
-      await supabase
-        .from('ingredient_masters')
-        .update({ current_stock: Math.max(0, (master.current_stock || 0) - deductQty) })
-        .eq('id', master.id);
+
+      const totalInRecipeUnit = item.quantity_per_unit * batchQty;
+      let delta;
+
+      if (!master.items_per_unit || !master.base_unit || item.unit === master.unit) {
+        // Resep pakai satuan beli langsung (mis. 'kaleng', 'pack'), atau bahan tanpa sub-satuan
+        delta = convertUnit(totalInRecipeUnit, item.unit, master.unit);
+      } else {
+        // Resep pakai satuan isi (mis. 'ml', 'gr') → konversi ke base_unit → bagi items_per_unit
+        const totalInBaseUnit = convertUnit(totalInRecipeUnit, item.unit, master.base_unit);
+        delta = totalInBaseUnit / master.items_per_unit;
+      }
+
+      await supabase.rpc('adjust_ingredient_stock', { p_id: master.id, p_delta: delta * sign });
     }
     return true;
   };
 
-  const restoreIngredientStock = async (productId, batchQty) => {
-    const { data: recipeItems } = await supabase
-      .from('recipes')
-      .select('quantity_per_unit, unit, ingredient_master_id, ingredient_masters(id, unit, current_stock)')
-      .eq('product_id', productId);
-    if (!recipeItems || recipeItems.length === 0) return;
-    for (const item of recipeItems) {
-      const master = item.ingredient_masters;
-      if (!master) continue;
-      const restoreQty = convertUnit(item.quantity_per_unit * batchQty, item.unit, master.unit);
-      await supabase
-        .from('ingredient_masters')
-        .update({ current_stock: (master.current_stock || 0) + restoreQty })
-        .eq('id', master.id);
-    }
-  };
+  const deductIngredientStock  = (productId, qty) => adjustIngredientStock(productId, qty, -1);
+  const restoreIngredientStock = (productId, qty) => adjustIngredientStock(productId, qty, +1);
 
   const handleAdd = async (e) => {
     e.preventDefault();
@@ -113,32 +122,37 @@ export default function Produksi() {
       return;
     }
 
+    const bawa   = formData.quantity;
+    const failed = formData.failed || 0;
+    const total  = bawa + failed;
+
     const { error: insertError } = await supabase.from('production_logs').insert([{
       product_id: formData.product_id,
-      quantity: formData.quantity,
+      quantity: bawa,
+      failed,
       notes: formData.notes || null,
       created_by: user?.id
     }]);
 
     if (insertError) {
-      setError(insertError.message);
+      setError(friendlyError(insertError));
       setFormLoading(false);
       return;
     }
 
-    // Tambah stok produk jadi
+    // Stok produk jadi hanya tambah dari yang berhasil (bawa)
     const { data: currentProduct } = await supabase
       .from('products').select('stock').eq('id', formData.product_id).single();
     await supabase
       .from('products')
-      .update({ stock: (currentProduct?.stock || 0) + formData.quantity })
+      .update({ stock: (currentProduct?.stock || 0) + bawa })
       .eq('id', formData.product_id);
 
-    // Kurangi stok bahan baku sesuai resep
-    const hasRecipe = await deductIngredientStock(formData.product_id, formData.quantity);
+    // Bahan baku dikurangi dari total dibuat (termasuk yang gagal)
+    const hasRecipe = await deductIngredientStock(formData.product_id, total);
 
     setIsModalOpen(false);
-    setFormData({ product_id: '', quantity: 1, notes: '' });
+    setFormData({ product_id: '', quantity: 1, failed: 0, notes: '' });
     fetchLogs();
     setFormLoading(false);
 
@@ -149,10 +163,17 @@ export default function Produksi() {
     }
   };
 
-  const handleDelete = async (id, productId, quantity) => {
-    if (!confirm('Yakin ingin hapus catatan produksi ini? Stok produk dan bahan akan dikembalikan.')) return;
+  const handleDelete = (id, productId, quantity, failed) => {
+    openConfirm(
+      'Hapus Catatan Produksi?',
+      'Stok produk dan bahan baku akan dikembalikan ke jumlah semula.',
+      () => executeDelete(id, productId, quantity, failed)
+    );
+  };
 
-    await restoreIngredientStock(productId, quantity);
+  const executeDelete = async (id, productId, quantity, failed) => {
+    const total = quantity + (failed || 0);
+    await restoreIngredientStock(productId, total);
     await supabase.from('production_logs').delete().eq('id', id);
 
     const { data: currentProduct } = await supabase
@@ -231,18 +252,25 @@ export default function Produksi() {
               <tr className="bg-gray-50 dark:bg-gray-800/50 text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
                 <th className="p-4 font-medium">Tanggal & Waktu</th>
                 <th className="p-4 font-medium">Produk</th>
-                <th className="p-4 font-medium text-right">Jumlah</th>
+                <th className="p-4 font-medium text-right">Bawa</th>
+                <th className="p-4 font-medium text-right">Gagal</th>
+                <th className="p-4 font-medium text-right">Terjual</th>
+                <th className="p-4 font-medium text-right">Sisa</th>
                 <th className="p-4 font-medium">Catatan</th>
                 <th className="p-4 font-medium">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-800 text-sm">
               {loading ? (
-                <tr><td colSpan="5" className="p-8 text-center text-gray-500">Memuat data...</td></tr>
+                <tr><td colSpan="8" className="p-8 text-center text-gray-500">Memuat data...</td></tr>
               ) : logs.length === 0 ? (
-                <tr><td colSpan="5" className="p-8 text-center text-gray-500">Belum ada catatan produksi.</td></tr>
+                <tr><td colSpan="8" className="p-8 text-center text-gray-500">Belum ada catatan produksi.</td></tr>
               ) : (
-                logs.map((log) => (
+                logs.map((log) => {
+                  const dateKey = format(new Date(log.production_date), 'yyyy-MM-dd');
+                  const terjual = salesMap[`${log.product_id}_${dateKey}`] || 0;
+                  const sisa    = Math.max(0, log.quantity - terjual);
+                  return (
                   <tr key={log.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                       {format(new Date(log.production_date), 'dd MMM yyyy, HH:mm', { locale: localeId })}
@@ -253,19 +281,33 @@ export default function Produksi() {
                     <td className="p-4 text-right font-bold text-primary-600 dark:text-primary-400">
                       {log.quantity} pcs
                     </td>
+                    <td className="p-4 text-right">
+                      {log.failed > 0
+                        ? <span className="font-semibold text-red-500">{log.failed} pcs</span>
+                        : <span className="text-gray-300 dark:text-gray-600">—</span>}
+                    </td>
+                    <td className="p-4 text-right font-semibold text-emerald-600 dark:text-emerald-400">
+                      {terjual > 0 ? `${terjual} pcs` : <span className="text-gray-300 dark:text-gray-600">—</span>}
+                    </td>
+                    <td className="p-4 text-right">
+                      <span className={`font-semibold ${sisa > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400'}`}>
+                        {sisa > 0 ? `${sisa} pcs` : <span className="text-emerald-500 text-xs font-medium">Habis</span>}
+                      </span>
+                    </td>
                     <td className="p-4 text-gray-500 dark:text-gray-400 text-sm">
                       {log.notes || '-'}
                     </td>
                     <td className="p-4">
                       <button
-                        onClick={() => handleDelete(log.id, log.product_id, log.quantity)}
+                        onClick={() => handleDelete(log.id, log.product_id, log.quantity, log.failed)}
                         className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
                       >
                         <Trash2 size={16} />
                       </button>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -273,6 +315,13 @@ export default function Produksi() {
       </div>
 
       <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
+      <ConfirmDialog
+        isOpen={confirmDialog.open}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        onConfirm={() => { closeConfirm(); confirmDialog.onConfirm?.(); }}
+        onCancel={closeConfirm}
+      />
 
       {/* Modal Tambah */}
       {isModalOpen && (
@@ -307,16 +356,31 @@ export default function Produksi() {
                 </select>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jumlah Diproduksi (pcs)</label>
-                <input
-                  type="number" min="1" required
-                  value={formData.quantity}
-                  onChange={(e) => setFormData({ ...formData, quantity: e.target.value === '' ? 1 : parseInt(e.target.value) })}
-                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
-                />
-                <p className="text-xs text-gray-400 mt-1">Stok produk akan bertambah secara otomatis.</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Berhasil / Bawa (pcs)</label>
+                  <input
+                    type="number" min="1" required
+                    value={formData.quantity}
+                    onChange={(e) => setFormData({ ...formData, quantity: e.target.value === '' ? 1 : parseInt(e.target.value) })}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Gagal / Rusak (pcs)</label>
+                  <input
+                    type="number" min="0"
+                    value={formData.failed}
+                    onChange={(e) => setFormData({ ...formData, failed: e.target.value === '' ? 0 : parseInt(e.target.value) })}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-red-200 dark:border-red-900/40 rounded-xl text-sm focus:border-red-400 outline-none"
+                  />
+                </div>
               </div>
+              {formData.failed > 0 && (
+                <p className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 rounded-lg">
+                  Total dibuat: {formData.quantity + formData.failed} pcs · Bahan dikurangi dari {formData.quantity + formData.failed} pcs · Stok bertambah {formData.quantity} pcs
+                </p>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Catatan (Opsional)</label>

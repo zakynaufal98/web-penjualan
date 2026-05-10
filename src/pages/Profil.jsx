@@ -22,7 +22,7 @@ export default function Profil() {
             <User size={48} />
           </div>
           <div className="text-center sm:text-left">
-            <h2 className="text-xl font-bold text-gray-900 dark:text-white">Admin CakeFinance</h2>
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white">Admin Kukis</h2>
             <p className="text-gray-500 dark:text-gray-400 flex items-center justify-center sm:justify-start gap-2 mt-1">
               <Mail size={16} /> {user?.email || 'admin@cakefinance.com'}
             </p>
@@ -35,7 +35,7 @@ export default function Profil() {
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Nama Lengkap</label>
-            <input type="text" defaultValue="Admin CakeFinance" className="w-full px-4 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500 transition-colors" />
+            <input type="text" defaultValue="Admin Kukis" className="w-full px-4 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500 transition-colors" />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>

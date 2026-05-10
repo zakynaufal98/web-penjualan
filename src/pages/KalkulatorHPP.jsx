@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Calculator, Plus, Trash2, Save, ArrowRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
 
 const DRAFT_KEY = 'hpp_draft';
 
@@ -31,6 +32,9 @@ export default function KalkulatorHPP() {
   const [selectedProductId, setSelectedProductId] = useState(draft?.selectedProductId || '');
   const [isSaving, setIsSaving] = useState(false);
   const [toast, setToast] = useState({ message: '', type: 'success' });
+  const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null, variant: 'danger' });
+  const openConfirm = (title, message, onConfirm, variant = 'danger') => setConfirmDialog({ open: true, title, message, onConfirm, variant });
+  const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
 
   useEffect(() => {
     fetchIngredients();
@@ -234,7 +238,7 @@ export default function KalkulatorHPP() {
         </div>
         {(recipeName || recipeItems.some(i => i.ingredient_id || i.used_qty)) && (
           <button
-            onClick={() => { if (confirm('Reset semua input kalkulator?')) clearDraft(); }}
+            onClick={() => openConfirm('Reset Kalkulator?', 'Semua input akan dihapus dan tidak bisa dikembalikan.', clearDraft, 'warning')}
             className="flex items-center gap-2 text-sm text-gray-400 hover:text-red-500 transition-colors"
           >
             <Trash2 size={15} /> Reset Kalkulator
@@ -499,6 +503,7 @@ export default function KalkulatorHPP() {
         type={toast.type}
         onClose={() => setToast({ message: '', type: 'success' })}
       />
+      <ConfirmDialog isOpen={confirmDialog.open} title={confirmDialog.title} message={confirmDialog.message} variant={confirmDialog.variant} onConfirm={() => { closeConfirm(); confirmDialog.onConfirm?.(); }} onCancel={closeConfirm} />
     </div>
   );
 }

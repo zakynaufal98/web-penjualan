@@ -15,9 +15,12 @@ export const useStore = create(
 
       user: null,
       setUser: (user) => set({ user }),
+
+      bankInfo: { bank: '', owner: '', number: '' },
+      setBankInfo: (info) => set({ bankInfo: info }),
     }),
     {
-      name: 'cake-finance-storage',
+      name: 'kukis-storage',
     }
   )
 );

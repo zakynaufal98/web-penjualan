@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { BookOpen, Plus, Trash2, AlertCircle, Loader2, PackageSearch, Package, Edit2, X } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
+import { friendlyError } from '../lib/errorUtils';
 
 export default function Resep() {
   const [activeTab, setActiveTab] = useState('resep');
@@ -17,6 +18,12 @@ export default function Resep() {
   const [error, setError] = useState('');
 
   const [newItem, setNewItem] = useState({ ingredient_master_id: '', quantity_per_unit: '', unit: 'gr' });
+
+  // Edit resep item state
+  const [editingRecipeItem, setEditingRecipeItem] = useState(null);
+  const [editQty, setEditQty] = useState('');
+  const [editUnit, setEditUnit] = useState('gr');
+  const [editRecipeLoading, setEditRecipeLoading] = useState(false);
 
   // Edit stok state
   const [editingMaster, setEditingMaster] = useState(null);
@@ -59,6 +66,9 @@ export default function Resep() {
           pricePerBase = ing.unit_price / 1000; qtyBase = ing.quantity * 1000;
         } else if (ing.unit === 'liter') {
           pricePerBase = ing.unit_price / 1000; qtyBase = ing.quantity * 1000;
+        } else if (ing.unit === 'gr' || ing.unit === 'ml') {
+          // unit_price is total batch price (e.g. 35000 for 500gr), not per-gram
+          pricePerBase = ing.unit_price / ing.quantity; qtyBase = ing.quantity;
         } else {
           pricePerBase = ing.unit_price; qtyBase = ing.quantity;
         }
@@ -142,7 +152,7 @@ export default function Resep() {
       unit: newItem.unit
     }]);
     if (insertError) {
-      setError(insertError.message.includes('unique') ? 'Bahan ini sudah ada di resep.' : insertError.message);
+      setError(insertError.message.includes('unique') ? 'Bahan ini sudah ada di resep.' : friendlyError(insertError));
     } else {
       setNewItem({ ingredient_master_id: '', quantity_per_unit: '', unit: 'gr' });
       await recalcAndUpdateProductHPP(selectedProductId, overhead);
@@ -150,6 +160,27 @@ export default function Resep() {
       fetchRecipe(selectedProductId);
     }
     setSaving(false);
+  };
+
+  const openEditRecipeItem = (item) => {
+    setEditingRecipeItem(item);
+    setEditQty(item.quantity_per_unit);
+    setEditUnit(item.unit);
+  };
+
+  const handleSaveRecipeItem = async (e) => {
+    e.preventDefault();
+    if (parseFloat(editQty) <= 0) return;
+    setEditRecipeLoading(true);
+    await supabase.from('recipes').update({
+      quantity_per_unit: parseFloat(editQty),
+      unit: editUnit,
+    }).eq('id', editingRecipeItem.id);
+    setEditingRecipeItem(null);
+    await recalcAndUpdateProductHPP(selectedProductId, overhead);
+    setToast({ message: 'Bahan resep diperbarui & HPP dihitung ulang!', type: 'success' });
+    fetchRecipe(selectedProductId);
+    setEditRecipeLoading(false);
   };
 
   const handleDeleteRecipeItem = async (id) => {
@@ -352,9 +383,14 @@ export default function Resep() {
                               )}
                             </td>
                             <td className="p-4">
-                              <button onClick={() => handleDeleteRecipeItem(item.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors">
-                                <Trash2 size={15} />
-                              </button>
+                              <div className="flex items-center gap-1">
+                                <button onClick={() => openEditRecipeItem(item)} className="p-2 text-gray-400 hover:text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/20 rounded-lg transition-colors">
+                                  <Edit2 size={15} />
+                                </button>
+                                <button onClick={() => handleDeleteRecipeItem(item.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors">
+                                  <Trash2 size={15} />
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -441,7 +477,7 @@ export default function Resep() {
                         value={newItem.ingredient_master_id}
                         onChange={(e) => {
                           const master = ingredientMasters.find(m => m.id === e.target.value);
-                          setNewItem({ ...newItem, ingredient_master_id: e.target.value, unit: master?.unit || 'gr' });
+                          setNewItem({ ...newItem, ingredient_master_id: e.target.value, unit: master?.base_unit || 'gr' });
                         }}
                         className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:border-primary-500 outline-none"
                       >
@@ -565,6 +601,55 @@ export default function Resep() {
       )}
 
       <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
+
+      {/* Modal Edit Bahan Resep */}
+      {editingRecipeItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 w-full max-w-sm">
+            <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800">
+              <h2 className="font-bold text-gray-900 dark:text-white text-sm">
+                Edit: {editingRecipeItem.ingredient_masters?.name}
+              </h2>
+              <button onClick={() => setEditingRecipeItem(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleSaveRecipeItem} className="p-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                  Qty per 1 pcs produk
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="number" min="0" step="any" required autoFocus
+                    value={editQty}
+                    onChange={(e) => setEditQty(e.target.value)}
+                    className="flex-1 px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                  />
+                  <select
+                    value={editUnit}
+                    onChange={(e) => setEditUnit(e.target.value)}
+                    className="px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none"
+                  >
+                    <option value="gr">gr</option>
+                    <option value="kg">kg</option>
+                    <option value="ml">ml</option>
+                    <option value="liter">L</option>
+                    <option value="pcs">pcs</option>
+                    <option value="lembar">lembar</option>
+                  </select>
+                </div>
+              </div>
+              <button
+                type="submit" disabled={editRecipeLoading}
+                className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2.5 rounded-xl text-sm font-medium transition-colors disabled:opacity-70"
+              >
+                {editRecipeLoading ? <Loader2 className="animate-spin" size={16} /> : 'Simpan & Hitung Ulang HPP'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Modal Edit Stok */}
       {editingMaster && (

@@ -163,7 +163,7 @@ export default function Dashboard() {
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-50">Ringkasan Hari Ini</h1>
-          <p className="text-gray-500 dark:text-gray-400 mt-1">Pantau performa bisnis CakeFinance Anda dari data asli.</p>
+          <p className="text-gray-500 dark:text-gray-400 mt-1">Pantau performa bisnis Kukis Anda dari data asli.</p>
         </div>
       </div>
       

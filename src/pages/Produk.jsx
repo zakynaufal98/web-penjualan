@@ -3,6 +3,8 @@ import { Search, Plus, AlertTriangle, X, Loader2, AlertCircle, Edit2, Trash2, Im
 import { supabase } from '../lib/supabase';
 import { uploadProductImage } from '../lib/uploadImage';
 import Toast from '../components/ui/Toast';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
+import { friendlyError } from '../lib/errorUtils';
 
 export default function Produk() {
   const [searchTerm, setSearchTerm] = useState('');
@@ -18,6 +20,9 @@ export default function Produk() {
   const [imageUploading, setImageUploading] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState({ message: '', type: 'success' });
+  const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null });
+  const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
+  const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
 
   useEffect(() => {
     fetchProducts();
@@ -96,7 +101,7 @@ export default function Produk() {
       : await supabase.from('products').insert([{ ...payload, is_available: true }]);
 
     if (dbError) {
-      setError(dbError.message);
+      setError(friendlyError(dbError));
     } else {
       setIsModalOpen(false);
       setToast({ message: editingProduct ? 'Produk berhasil diperbarui!' : 'Produk berhasil ditambahkan!', type: 'success' });
@@ -105,15 +110,17 @@ export default function Produk() {
     setFormLoading(false);
   };
 
-  const handleDelete = async (id) => {
-    if (confirm('Yakin ingin menghapus produk ini?')) {
-      const { error: delError } = await supabase.from('products').delete().eq('id', id);
-      if (delError) {
-        setToast({ message: 'Gagal menghapus produk.', type: 'error' });
-      } else {
-        setToast({ message: 'Produk berhasil dihapus.', type: 'success' });
-        fetchProducts();
-      }
+  const handleDelete = (id) => {
+    openConfirm('Hapus Produk?', 'Produk yang dihapus tidak bisa dikembalikan.', () => executeDelete(id));
+  };
+
+  const executeDelete = async (id) => {
+    const { error: delError } = await supabase.from('products').delete().eq('id', id);
+    if (delError) {
+      setToast({ message: 'Gagal menghapus produk.', type: 'error' });
+    } else {
+      setToast({ message: 'Produk berhasil dihapus.', type: 'success' });
+      fetchProducts();
     }
   };
 
@@ -222,6 +229,7 @@ export default function Produk() {
       )}
 
       <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
+      <ConfirmDialog isOpen={confirmDialog.open} title={confirmDialog.title} message={confirmDialog.message} onConfirm={() => { closeConfirm(); confirmDialog.onConfirm?.(); }} onCancel={closeConfirm} />
 
       {/* Modal Tambah Produk */}
       {isModalOpen && (

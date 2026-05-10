@@ -1,93 +1,203 @@
 import { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
-import { Download, FileText, Printer, Calendar, Loader2 } from 'lucide-react';
+import { Calendar, Loader2, ChevronLeft, ChevronRight, Copy, Check, BarChart2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { getMonth, getYear, parseISO, startOfYear, endOfYear } from 'date-fns';
+import { useStore } from '../store/useStore';
+import {
+  getMonth, parseISO, startOfYear, endOfYear,
+  startOfWeek, addDays, subDays, format, subWeeks, addWeeks,
+} from 'date-fns';
+
+const DAY_NAMES = ['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
+const MONTHS    = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
 
 export default function Laporan() {
-  const [loading, setLoading] = useState(true);
-  const [year, setYear] = useState(new Date().getFullYear());
+  const { bankInfo } = useStore();
+  const [activeTab, setActiveTab] = useState('bulanan');
+
+  // ── Monthly ──
+  const [loading, setLoading]         = useState(true);
+  const [year, setYear]               = useState(new Date().getFullYear());
   const [monthlyData, setMonthlyData] = useState([]);
-  const [stats, setStats] = useState({
-    profitThisMonth: 0,
-    profitLastMonth: 0,
-    totalSalesYear: 0,
-    averageMargin: 0
+  const [stats, setStats]             = useState({
+    profitThisMonth: 0, profitLastMonth: 0, totalSalesYear: 0, averageMargin: 0,
   });
 
-  useEffect(() => {
-    fetchReportData();
-  }, [year]);
+  // ── Weekly ──
+  const [weekStart, setWeekStart]     = useState(() => startOfWeek(new Date(), { weekStartsOn: 1 }));
+  const [weekReport, setWeekReport]   = useState([]);
+  const [weekLoading, setWeekLoading] = useState(false);
+  const [copied, setCopied]           = useState(false);
+
+  // ── Daily ──
+  const [selectedDay, setSelectedDay]   = useState(() => new Date());
+  const [dayReport, setDayReport]       = useState([]);
+  const [dayLoading, setDayLoading]     = useState(false);
+  const [dayCopied, setDayCopied]       = useState(false);
+
+  useEffect(() => { if (activeTab === 'bulanan') fetchReportData(); }, [year, activeTab]);
+  useEffect(() => { if (activeTab === 'rekap')   fetchWeeklyReport(); }, [weekStart, activeTab]);
+  useEffect(() => { if (activeTab === 'harian')  fetchDailyReport(); }, [selectedDay, activeTab]);
 
   const fetchReportData = async () => {
     setLoading(true);
-    const startDate = startOfYear(new Date(year, 0, 1)).toISOString();
-    const endDate = endOfYear(new Date(year, 11, 31)).toISOString();
+    const s = startOfYear(new Date(year, 0, 1)).toISOString();
+    const e = endOfYear(new Date(year, 11, 31)).toISOString();
 
-    const { data: salesData } = await supabase
-      .from('sales')
-      .select('*')
-      .gte('transaction_date', startDate)
-      .lte('transaction_date', endDate);
+    const [{ data: salesData }, { data: expData }] = await Promise.all([
+      supabase.from('sales').select('*').gte('transaction_date', s).lte('transaction_date', e),
+      supabase.from('ingredients').select('*').gte('purchase_date', s).lte('purchase_date', e),
+    ]);
 
-    const { data: expensesData } = await supabase
-      .from('ingredients')
-      .select('*')
-      .gte('purchase_date', startDate)
-      .lte('purchase_date', endDate);
+    const byMonth = MONTHS.map(m => ({ name: m, sales: 0, expenses: 0, profit: 0, margin: 0 }));
+    let totalSalesYear = 0;
 
-    if (salesData && expensesData) {
-      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
-      const dataByMonth = months.map(m => ({ name: m, sales: 0, expenses: 0, profit: 0 }));
+    (salesData || []).forEach(sale => {
+      const m = getMonth(parseISO(sale.transaction_date));
+      const amt = sale.total_price || sale.unit_price * sale.quantity;
+      byMonth[m].sales += amt;
+      totalSalesYear += amt;
+    });
+    (expData || []).forEach(exp => {
+      const m = getMonth(parseISO(exp.purchase_date));
+      byMonth[m].expenses += exp.total_price || exp.unit_price * exp.quantity;
+    });
 
-      let totalSalesYear = 0;
-      let totalExpensesYear = 0;
+    let marginSum = 0, activeMonths = 0;
+    byMonth.forEach(m => {
+      m.profit = m.sales - m.expenses;
+      if (m.sales > 0) { m.margin = (m.profit / m.sales) * 100; marginSum += m.margin; activeMonths++; }
+    });
 
-      salesData.forEach(sale => {
-        const monthIdx = getMonth(parseISO(sale.transaction_date));
-        const amount = sale.total_price || (sale.unit_price * sale.quantity);
-        dataByMonth[monthIdx].sales += amount;
-        totalSalesYear += amount;
-      });
-
-      expensesData.forEach(exp => {
-        const monthIdx = getMonth(parseISO(exp.purchase_date));
-        const amount = exp.total_price || (exp.unit_price * exp.quantity);
-        dataByMonth[monthIdx].expenses += amount;
-        totalExpensesYear += amount;
-      });
-
-      let marginSum = 0;
-      let activeMonths = 0;
-
-      dataByMonth.forEach(m => {
-        m.profit = m.sales - m.expenses;
-        if (m.sales > 0) {
-          m.margin = (m.profit / m.sales) * 100;
-          marginSum += m.margin;
-          activeMonths++;
-        } else {
-          m.margin = 0;
-        }
-      });
-
-      setMonthlyData(dataByMonth);
-
-      const currentMonthIdx = getMonth(new Date());
-      const profitThisMonth = dataByMonth[currentMonthIdx].profit;
-      const profitLastMonth = currentMonthIdx > 0 ? dataByMonth[currentMonthIdx - 1].profit : 0;
-      
-      const averageMargin = activeMonths > 0 ? (marginSum / activeMonths) : 0;
-
-      setStats({
-        profitThisMonth,
-        profitLastMonth,
-        totalSalesYear,
-        averageMargin
-      });
-    }
-
+    setMonthlyData(byMonth);
+    const cur = getMonth(new Date());
+    setStats({
+      profitThisMonth: byMonth[cur].profit,
+      profitLastMonth: cur > 0 ? byMonth[cur - 1].profit : 0,
+      totalSalesYear,
+      averageMargin: activeMonths > 0 ? marginSum / activeMonths : 0,
+    });
     setLoading(false);
+  };
+
+  const fetchWeeklyReport = async () => {
+    setWeekLoading(true);
+    const weekEnd = addDays(weekStart, 6);
+    const startISO = weekStart.toISOString();
+    const endISO   = new Date(weekEnd.getFullYear(), weekEnd.getMonth(), weekEnd.getDate(), 23, 59, 59).toISOString();
+
+    const [{ data: prodData }, { data: salesData }] = await Promise.all([
+      supabase.from('production_logs').select('*, products(name, selling_price)').gte('production_date', startISO).lte('production_date', endISO),
+      supabase.from('sales').select('*, products(name, selling_price)').gte('transaction_date', startISO).lte('transaction_date', endISO),
+    ]);
+
+    const report = Array.from({ length: 7 }, (_, i) => {
+      const day = addDays(weekStart, i);
+      const key = format(day, 'yyyy-MM-dd');
+
+      const dayProd  = (prodData  || []).filter(p => format(parseISO(p.production_date),  'yyyy-MM-dd') === key);
+      const daySales = (salesData || []).filter(s => format(parseISO(s.transaction_date), 'yyyy-MM-dd') === key);
+
+      const map = {};
+      dayProd.forEach(p => {
+        const name = p.products?.name || 'Produk';
+        if (!map[name]) map[name] = { name, bawa: 0, gagal: 0, terjual: 0, total: 0, hasProd: false };
+        map[name].bawa  += p.quantity;
+        map[name].gagal += p.failed || 0;
+        map[name].hasProd = true;
+      });
+      daySales.forEach(s => {
+        const name = s.products?.name || 'Produk';
+        if (!map[name]) map[name] = { name, bawa: 0, gagal: 0, terjual: 0, total: 0, hasProd: false };
+        map[name].terjual += s.quantity;
+        map[name].total   += s.total_price || s.unit_price * s.quantity;
+      });
+
+      const items    = Object.values(map).map(it => ({ ...it, sisa: it.hasProd ? Math.max(0, it.bawa - it.terjual) : null }));
+      const dayTotal = items.reduce((s, it) => s + it.total, 0);
+      return { day, dayName: DAY_NAMES[day.getDay()], key, items, dayTotal, hasData: items.length > 0 };
+    });
+
+    setWeekReport(report);
+    setWeekLoading(false);
+  };
+
+  const weekTotal = weekReport.reduce((s, d) => s + d.dayTotal, 0);
+
+  const generateText = () => {
+    let text = '';
+    weekReport.filter(d => d.hasData).forEach(d => {
+      text += `${d.dayName}\n`;
+      d.items.forEach(it => {
+        text += it.hasProd
+          ? `${it.name} bawa ${it.bawa}${it.gagal > 0 ? ` gagal ${it.gagal}` : ''} sisa ${it.sisa} = ${it.total.toLocaleString('id-ID')}\n`
+          : `${it.name} terjual ${it.terjual} = ${it.total.toLocaleString('id-ID')}\n`;
+      });
+      text += `total ${d.dayTotal.toLocaleString('id-ID')}\n\n`;
+    });
+    if (weekTotal > 0) text += `total keseluruhan ${weekTotal.toLocaleString('id-ID')}\n\n`;
+    if (bankInfo?.number) text += `Nama bank, pemilik & Nomor rekening :${bankInfo.number} ${bankInfo.bank} a/n ${bankInfo.owner}`;
+    return text;
+  };
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(generateText());
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  };
+
+  const fetchDailyReport = async () => {
+    setDayLoading(true);
+    const key     = format(selectedDay, 'yyyy-MM-dd');
+    const startISO = `${key}T00:00:00.000Z`;
+    const endISO   = `${key}T23:59:59.999Z`;
+
+    const [{ data: prodData }, { data: salesData }] = await Promise.all([
+      supabase.from('production_logs').select('*, products(name, selling_price)').gte('production_date', startISO).lte('production_date', endISO),
+      supabase.from('sales').select('*, products(name, selling_price)').gte('transaction_date', startISO).lte('transaction_date', endISO),
+    ]);
+
+    const map = {};
+    (prodData || []).forEach(p => {
+      const name = p.products?.name || 'Produk';
+      if (!map[name]) map[name] = { name, bawa: 0, gagal: 0, terjual: 0, total: 0, hasProd: false };
+      map[name].bawa  += p.quantity;
+      map[name].gagal += p.failed || 0;
+      map[name].hasProd = true;
+    });
+    (salesData || []).forEach(s => {
+      const name = s.products?.name || 'Produk';
+      if (!map[name]) map[name] = { name, bawa: 0, terjual: 0, total: 0, hasProd: false };
+      map[name].terjual += s.quantity;
+      map[name].total   += s.total_price || s.unit_price * s.quantity;
+    });
+
+    const items = Object.values(map).map(it => ({
+      ...it, sisa: it.hasProd ? Math.max(0, it.bawa - it.terjual) : null,
+    }));
+    setDayReport(items);
+    setDayLoading(false);
+  };
+
+  const dayTotal = dayReport.reduce((s, it) => s + it.total, 0);
+
+  const generateDayText = () => {
+    const dayName = DAY_NAMES[selectedDay.getDay()];
+    let text = `${dayName}\n`;
+    dayReport.forEach(it => {
+      text += it.hasProd
+        ? `${it.name} bawa ${it.bawa} sisa ${it.sisa} = ${it.total.toLocaleString('id-ID')}\n`
+        : `${it.name} terjual ${it.terjual} = ${it.total.toLocaleString('id-ID')}\n`;
+    });
+    text += `total ${dayTotal.toLocaleString('id-ID')}`;
+    if (bankInfo?.number) text += `\n\nNama bank, pemilik & Nomor rekening :${bankInfo.number} ${bankInfo.bank} a/n ${bankInfo.owner}`;
+    return text;
+  };
+
+  const handleDayCopy = async () => {
+    await navigator.clipboard.writeText(generateDayText());
+    setDayCopied(true);
+    setTimeout(() => setDayCopied(false), 2500);
   };
 
   const getProfitChange = () => {
@@ -95,102 +205,260 @@ export default function Laporan() {
     return ((stats.profitThisMonth - stats.profitLastMonth) / stats.profitLastMonth) * 100;
   };
 
+  const weekLabel = `${format(weekStart, 'd MMM')} – ${format(addDays(weekStart, 6), 'd MMM yyyy')}`;
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-50">Laporan Keuangan</h1>
-          <p className="text-gray-500 dark:text-gray-400 mt-1">Analisis performa bisnis dan cetak laporan.</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button className="flex items-center gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300 px-4 py-2.5 rounded-xl text-sm font-medium transition-colors">
-            <Printer size={18} />
-            <span className="hidden sm:inline">Print</span>
-          </button>
-          <button className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors shadow-sm shadow-emerald-600/20">
-            <Download size={18} />
-            <span>Export Excel</span>
-          </button>
-          <button className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors shadow-sm shadow-red-600/20">
-            <FileText size={18} />
-            <span>Export PDF</span>
-          </button>
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-50">Laporan Keuangan</h1>
+        <p className="text-gray-500 dark:text-gray-400 mt-1">Analisis performa bisnis dan rekap penjualan.</p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
-          <h3 className="text-gray-500 dark:text-gray-400 font-medium text-sm mb-1">Untung Bulan Ini</h3>
-          {loading ? (
-            <Loader2 className="animate-spin text-gray-400 my-2" />
-          ) : (
-            <>
-              <p className="text-3xl font-bold text-gray-900 dark:text-white">Rp {stats.profitThisMonth.toLocaleString('id-ID')}</p>
-              <p className={`text-sm font-medium mt-2 ${getProfitChange() >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
-                {getProfitChange() >= 0 ? '+' : ''}{getProfitChange().toFixed(1)}% dari bulan lalu
-              </p>
-            </>
-          )}
-        </div>
-        <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
-          <h3 className="text-gray-500 dark:text-gray-400 font-medium text-sm mb-1">Margin Keuntungan Rata-rata</h3>
-          {loading ? (
-            <Loader2 className="animate-spin text-gray-400 my-2" />
-          ) : (
-            <>
-              <p className="text-3xl font-bold text-gray-900 dark:text-white">{stats.averageMargin.toFixed(1)}%</p>
-              <p className={`text-sm font-medium mt-2 ${stats.averageMargin >= 40 ? 'text-emerald-500' : stats.averageMargin >= 20 ? 'text-amber-500' : 'text-red-500'}`}>
-                {stats.averageMargin >= 40 ? 'Sangat Sehat' : stats.averageMargin >= 20 ? 'Cukup Sehat' : 'Perlu Evaluasi Harga'}
-              </p>
-            </>
-          )}
-        </div>
-        <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
-          <h3 className="text-gray-500 dark:text-gray-400 font-medium text-sm mb-1">Total Penjualan Tahun {year}</h3>
-          {loading ? (
-            <Loader2 className="animate-spin text-gray-400 my-2" />
-          ) : (
-            <>
-              <p className="text-3xl font-bold text-gray-900 dark:text-white">Rp {stats.totalSalesYear.toLocaleString('id-ID')}</p>
-              <p className="text-sm text-gray-400 mt-2">1 Jan - 31 Des {year}</p>
-            </>
-          )}
-        </div>
+      {/* Tabs */}
+      <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-xl p-1 w-full sm:w-fit">
+        {[
+          { id: 'bulanan', label: 'Bulanan',         icon: BarChart2 },
+          { id: 'harian',  label: 'Rekap Harian',    icon: Calendar  },
+          { id: 'rekap',   label: 'Rekap Mingguan',  icon: Calendar  },
+        ].map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            onClick={() => setActiveTab(id)}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+              activeTab === id
+                ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
+            }`}
+          >
+            <Icon size={15} /> {label}
+          </button>
+        ))}
       </div>
 
-      <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
-        <div className="flex flex-col sm:flex-row items-center justify-between mb-8 gap-4">
-          <h2 className="text-lg font-bold text-gray-900 dark:text-white">Grafik Keuntungan Bulanan</h2>
-          <div className="flex items-center gap-2">
-            <button className="flex items-center gap-2 px-3 py-1.5 border border-gray-200 dark:border-gray-700 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
-              <Calendar size={16} />
-              <span>Tahun {year}</span>
-            </button>
+      {/* ── TAB BULANAN ── */}
+      {activeTab === 'bulanan' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {[
+              { label: 'Untung Bulan Ini',        value: `Rp ${stats.profitThisMonth.toLocaleString('id-ID')}`,  sub: `${getProfitChange() >= 0 ? '+' : ''}${getProfitChange().toFixed(1)}% dari bulan lalu`, color: getProfitChange() >= 0 ? 'text-emerald-500' : 'text-red-500' },
+              { label: 'Margin Rata-rata',         value: `${stats.averageMargin.toFixed(1)}%`,                   sub: stats.averageMargin >= 40 ? 'Sangat Sehat' : stats.averageMargin >= 20 ? 'Cukup Sehat' : 'Perlu Evaluasi Harga', color: stats.averageMargin >= 40 ? 'text-emerald-500' : stats.averageMargin >= 20 ? 'text-amber-500' : 'text-red-500' },
+              { label: `Total Penjualan ${year}`,  value: `Rp ${stats.totalSalesYear.toLocaleString('id-ID')}`,   sub: `1 Jan – 31 Des ${year}`, color: 'text-gray-400' },
+            ].map(card => (
+              <div key={card.label} className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
+                <h3 className="text-gray-500 dark:text-gray-400 font-medium text-sm mb-1">{card.label}</h3>
+                {loading ? <Loader2 className="animate-spin text-gray-400 my-2" /> : (
+                  <>
+                    <p className="text-3xl font-bold text-gray-900 dark:text-white">{card.value}</p>
+                    <p className={`text-sm font-medium mt-2 ${card.color}`}>{card.sub}</p>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
+            <div className="flex items-center justify-between mb-8">
+              <h2 className="text-lg font-bold text-gray-900 dark:text-white">Grafik Keuntungan Bulanan</h2>
+              <div className="flex items-center gap-1">
+                <button onClick={() => setYear(y => y - 1)} className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500"><ChevronLeft size={18} /></button>
+                <span className="text-sm font-semibold text-gray-700 dark:text-gray-200 w-12 text-center">{year}</span>
+                <button onClick={() => setYear(y => y + 1)} className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500"><ChevronRight size={18} /></button>
+              </div>
+            </div>
+            <div className="h-80 w-full">
+              {loading ? (
+                <div className="w-full h-full flex items-center justify-center"><Loader2 size={32} className="animate-spin text-primary-500" /></div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={monthlyData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }} barSize={32}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#374151" opacity={0.2} />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#6b7280' }} dy={10} />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#6b7280' }} tickFormatter={v => `Rp ${v / 1000000}M`} />
+                    <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} formatter={v => [`Rp ${v.toLocaleString('id-ID')}`, undefined]} />
+                    <Legend verticalAlign="top" height={36} iconType="circle" />
+                    <Bar dataKey="profit" name="Untung Bersih" fill="#14b8a6" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
           </div>
         </div>
-        
-        <div className="h-80 w-full">
-          {loading ? (
-            <div className="w-full h-full flex items-center justify-center">
-              <Loader2 size={32} className="animate-spin text-primary-500" />
+      )}
+
+      {/* ── TAB REKAP HARIAN ── */}
+      {activeTab === 'harian' && (
+        <div className="space-y-4">
+          {/* Navigator hari */}
+          <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-1">
+              <button onClick={() => setSelectedDay(d => subDays(d, 1))} className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors">
+                <ChevronLeft size={18} />
+              </button>
+              <span className="text-sm font-semibold text-gray-900 dark:text-white min-w-[160px] text-center">
+                {DAY_NAMES[selectedDay.getDay()]}, {format(selectedDay, 'd MMM yyyy')}
+              </span>
+              <button onClick={() => setSelectedDay(d => addDays(d, 1))} className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors">
+                <ChevronRight size={18} />
+              </button>
+              <button
+                onClick={() => setSelectedDay(new Date())}
+                className="ml-1 text-xs text-primary-600 dark:text-primary-400 font-semibold hover:underline"
+              >
+                Hari ini
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={format(selectedDay, 'yyyy-MM-dd')}
+                onChange={(e) => e.target.value && setSelectedDay(new Date(e.target.value + 'T12:00:00'))}
+                className="px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500"
+              />
+              <button
+                onClick={handleDayCopy}
+                disabled={dayTotal === 0}
+                className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors"
+              >
+                {dayCopied ? <><Check size={16} /> Tersalin!</> : <><Copy size={16} /> Salin</>}
+              </button>
+            </div>
+          </div>
+
+          {dayLoading ? (
+            <div className="flex justify-center py-16"><Loader2 className="animate-spin text-primary-500" size={32} /></div>
+          ) : dayReport.length === 0 ? (
+            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 p-12 text-center">
+              <Calendar size={40} className="mx-auto text-gray-300 dark:text-gray-600 mb-3" />
+              <p className="text-gray-500 dark:text-gray-400 text-sm">Tidak ada data penjualan hari ini.</p>
             </div>
           ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={monthlyData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }} barSize={32}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#374151" opacity={0.2} />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#6b7280' }} dy={10} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#6b7280' }} tickFormatter={(val) => `Rp ${val/1000000}M`} />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', backgroundColor: 'rgba(255, 255, 255, 0.9)' }}
-                  formatter={(value) => [`Rp ${value.toLocaleString('id-ID')}`, 'Keuntungan']}
-                />
-                <Legend verticalAlign="top" height={36} iconType="circle" />
-                <Bar dataKey="profit" name="Untung Bersih" fill="#14b8a6" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <div className="space-y-3">
+              <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
+                <div className="px-5 py-3 bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800">
+                  <span className="font-bold text-gray-900 dark:text-white text-sm">
+                    {DAY_NAMES[selectedDay.getDay()]}, {format(selectedDay, 'd MMMM yyyy')}
+                  </span>
+                </div>
+                <div className="divide-y divide-gray-50 dark:divide-gray-800/50">
+                  {dayReport.map((it) => (
+                    <div key={it.name} className="px-5 py-3 flex items-center justify-between text-sm">
+                      <div className="flex-1 min-w-0">
+                        <span className="font-medium text-gray-900 dark:text-gray-100">{it.name}</span>
+                        <span className="text-gray-400 ml-2 text-xs">
+                          {it.hasProd ? `bawa ${it.bawa}${it.gagal > 0 ? ` · gagal ${it.gagal}` : ''} · sisa ${it.sisa}` : `terjual ${it.terjual}`}
+                        </span>
+                      </div>
+                      <span className={`font-semibold shrink-0 ${it.total > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-300'}`}>
+                        {it.total > 0 ? `Rp ${it.total.toLocaleString('id-ID')}` : '—'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div className="px-5 py-3 bg-primary-50 dark:bg-primary-900/20 border-t border-primary-100 dark:border-primary-900/30 flex justify-between">
+                  <span className="text-sm font-bold text-primary-700 dark:text-primary-300">Total</span>
+                  <span className="text-sm font-bold text-primary-700 dark:text-primary-300">Rp {dayTotal.toLocaleString('id-ID')}</span>
+                </div>
+              </div>
+
+              {bankInfo?.number && (
+                <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 px-5 py-4 text-sm text-gray-600 dark:text-gray-400">
+                  <span className="font-medium text-gray-800 dark:text-gray-200">Nama bank, pemilik &amp; Nomor rekening :</span>
+                  <span className="ml-1">{bankInfo.number} {bankInfo.bank} a/n {bankInfo.owner}</span>
+                </div>
+              )}
+            </div>
           )}
         </div>
-      </div>
+      )}
+
+      {/* ── TAB REKAP MINGGUAN ── */}
+      {activeTab === 'rekap' && (
+        <div className="space-y-4">
+          {/* Navigator */}
+          <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-1">
+              <button onClick={() => setWeekStart(w => subWeeks(w, 1))} className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors">
+                <ChevronLeft size={18} />
+              </button>
+              <span className="text-sm font-semibold text-gray-900 dark:text-white min-w-[170px] text-center">{weekLabel}</span>
+              <button onClick={() => setWeekStart(w => addWeeks(w, 1))} className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 transition-colors">
+                <ChevronRight size={18} />
+              </button>
+              <button
+                onClick={() => setWeekStart(startOfWeek(new Date(), { weekStartsOn: 1 }))}
+                className="ml-1 text-xs text-primary-600 dark:text-primary-400 font-semibold hover:underline"
+              >
+                Minggu ini
+              </button>
+            </div>
+            <button
+              onClick={handleCopy}
+              disabled={weekTotal === 0}
+              className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors"
+            >
+              {copied ? <><Check size={16} /> Tersalin!</> : <><Copy size={16} /> Salin Laporan</>}
+            </button>
+          </div>
+
+          {weekLoading ? (
+            <div className="flex justify-center py-16"><Loader2 className="animate-spin text-primary-500" size={32} /></div>
+          ) : weekReport.every(d => !d.hasData) ? (
+            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 p-12 text-center">
+              <Calendar size={40} className="mx-auto text-gray-300 dark:text-gray-600 mb-3" />
+              <p className="text-gray-500 dark:text-gray-400 text-sm">Tidak ada data penjualan minggu ini.</p>
+              <p className="text-gray-400 dark:text-gray-500 text-xs mt-1">Pastikan data produksi dan penjualan sudah dicatat.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {weekReport.filter(d => d.hasData).map((d) => (
+                <div key={d.key} className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
+                  <div className="px-5 py-3 bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
+                    <span className="font-bold text-gray-900 dark:text-white text-sm">{d.dayName}</span>
+                    <span className="text-xs text-gray-400">{format(d.day, 'd MMM yyyy')}</span>
+                  </div>
+                  <div className="divide-y divide-gray-50 dark:divide-gray-800/50">
+                    {d.items.map((it) => (
+                      <div key={it.name} className="px-5 py-2.5 flex items-center justify-between text-sm">
+                        <div className="flex-1 min-w-0">
+                          <span className="font-medium text-gray-900 dark:text-gray-100">{it.name}</span>
+                          <span className="text-gray-400 ml-2 text-xs">
+                            {it.hasProd ? `bawa ${it.bawa}${it.gagal > 0 ? ` · gagal ${it.gagal}` : ''} · sisa ${it.sisa}` : `terjual ${it.terjual}`}
+                          </span>
+                        </div>
+                        <span className={`font-semibold shrink-0 ${it.total > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-300'}`}>
+                          {it.total > 0 ? `Rp ${it.total.toLocaleString('id-ID')}` : '—'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="px-5 py-2.5 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-100 dark:border-gray-800 flex justify-between">
+                    <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Total {d.dayName}</span>
+                    <span className="font-bold text-gray-900 dark:text-white text-sm">Rp {d.dayTotal.toLocaleString('id-ID')}</span>
+                  </div>
+                </div>
+              ))}
+
+              {/* Total minggu */}
+              <div className="bg-primary-600 rounded-2xl p-5 flex justify-between items-center">
+                <span className="font-bold text-white">Total Keseluruhan</span>
+                <span className="text-2xl font-extrabold text-white">Rp {weekTotal.toLocaleString('id-ID')}</span>
+              </div>
+
+              {/* Info rekening */}
+              {bankInfo?.number ? (
+                <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 px-5 py-4 text-sm text-gray-600 dark:text-gray-400">
+                  <span className="font-medium text-gray-800 dark:text-gray-200">Nama bank, pemilik &amp; Nomor rekening :</span>
+                  <span className="ml-1">{bankInfo.number} {bankInfo.bank} a/n {bankInfo.owner}</span>
+                </div>
+              ) : (
+                <p className="text-xs text-center text-gray-400">
+                  Belum ada info rekening. Isi di <span className="text-primary-500 font-medium">Pengaturan</span> agar muncul di laporan.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
