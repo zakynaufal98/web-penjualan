@@ -18,7 +18,8 @@ export default function Penjualan() {
     product_id: '',
     quantity: 1,
     payment_method: 'Cash',
-    customer_name: ''
+    customer_name: '',
+    transaction_date: new Date().toISOString().split('T')[0]
   });
   const [editingTransaction, setEditingTransaction] = useState(null);
   const [formLoading, setFormLoading] = useState(false);
@@ -56,7 +57,7 @@ export default function Penjualan() {
 
   const openAdd = () => {
     setEditingTransaction(null);
-    setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '' });
+    setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: new Date().toISOString().split('T')[0] });
     setError('');
     setIsModalOpen(true);
   };
@@ -67,7 +68,8 @@ export default function Penjualan() {
       product_id: trx.product_id,
       quantity: trx.quantity,
       payment_method: trx.payment_method,
-      customer_name: trx.customer_name || ''
+      customer_name: trx.customer_name || '',
+      transaction_date: trx.transaction_date ? trx.transaction_date.split('T')[0] : new Date().toISOString().split('T')[0]
     });
     setError('');
     setIsModalOpen(true);
@@ -99,6 +101,7 @@ export default function Penjualan() {
       unit_price: selectedProduct.selling_price,
       payment_method: formData.payment_method,
       customer_name: formData.customer_name || null,
+      transaction_date: new Date(formData.transaction_date).toISOString(),
     };
 
     const { error: dbError } = editingTransaction
@@ -109,7 +112,7 @@ export default function Penjualan() {
       setError(friendlyError(dbError));
     } else {
       setIsModalOpen(false);
-      setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '' });
+      setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: new Date().toISOString().split('T')[0] });
       setToast({ message: editingTransaction ? 'Transaksi berhasil diperbarui!' : 'Penjualan berhasil dicatat!', type: 'success' });
       fetchTransactions();
     }
@@ -233,6 +236,17 @@ export default function Penjualan() {
                   <AlertCircle size={18} /> {error}
                 </div>
               )}
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Tanggal Transaksi</label>
+                <input
+                  type="date" required
+                  value={formData.transaction_date}
+                  max={new Date().toISOString().split('T')[0]}
+                  onChange={(e) => setFormData({...formData, transaction_date: e.target.value})}
+                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                />
+              </div>
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Pilih Produk</label>

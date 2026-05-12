@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { BookOpen, Plus, Trash2, AlertCircle, Loader2, PackageSearch, Package, Edit2, X } from 'lucide-react';
+import { BookOpen, Plus, Trash2, AlertCircle, Loader2, PackageSearch, Package, Edit2, X, ArrowLeftRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import { friendlyError } from '../lib/errorUtils';
@@ -24,6 +24,10 @@ export default function Resep() {
   const [editQty, setEditQty] = useState('');
   const [editUnit, setEditUnit] = useState('gr');
   const [editRecipeLoading, setEditRecipeLoading] = useState(false);
+
+  // Scale resep state
+  const [scaleDialog, setScaleDialog] = useState({ open: false, fromPcs: '', toPcs: '' });
+  const [scaleLoading, setScaleLoading] = useState(false);
 
   // Edit stok state
   const [editingMaster, setEditingMaster] = useState(null);
@@ -190,6 +194,23 @@ export default function Resep() {
     fetchRecipe(selectedProductId);
   };
 
+  const handleScaleRecipe = async () => {
+    const from = parseFloat(scaleDialog.fromPcs);
+    const to   = parseFloat(scaleDialog.toPcs);
+    if (!from || !to || from <= 0 || to <= 0 || from === to) return;
+    setScaleLoading(true);
+    const ratio = from / to;
+    for (const item of recipeItems) {
+      const newQty = parseFloat((item.quantity_per_unit * ratio).toFixed(4));
+      await supabase.from('recipes').update({ quantity_per_unit: newQty }).eq('id', item.id);
+    }
+    await recalcAndUpdateProductHPP(selectedProductId, overhead);
+    await fetchRecipe(selectedProductId);
+    setScaleDialog({ open: false, fromPcs: '', toPcs: '' });
+    setScaleLoading(false);
+    setToast({ message: `Resep berhasil diskalakan: ${from} → ${to} pcs. HPP diperbarui!`, type: 'success' });
+  };
+
   const handleSaveOverhead = async () => {
     setSavingOverhead(true);
     await recalcAndUpdateProductHPP(selectedProductId, overhead);
@@ -316,10 +337,18 @@ export default function Resep() {
 
           {selectedProductId ? (
             <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 shadow-sm overflow-hidden">
-              <div className="p-5 border-b border-gray-100 dark:border-gray-800 flex items-center gap-3">
+              <div className="p-5 border-b border-gray-100 dark:border-gray-800 flex items-center gap-3 flex-wrap">
                 <BookOpen size={18} className="text-primary-600 dark:text-primary-400" />
                 <h2 className="font-bold text-gray-900 dark:text-white text-sm">{selectedProduct?.name}</h2>
                 <span className="text-xs text-gray-400 bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full">qty per 1 pcs produk</span>
+                {recipeItems.length > 0 && (
+                  <button
+                    onClick={() => setScaleDialog({ open: true, fromPcs: '', toPcs: '' })}
+                    className="ml-auto flex items-center gap-1.5 text-xs px-3 py-1.5 bg-violet-50 dark:bg-violet-900/20 text-violet-600 dark:text-violet-400 hover:bg-violet-100 dark:hover:bg-violet-900/40 border border-violet-200 dark:border-violet-800 rounded-lg transition-colors font-medium"
+                  >
+                    <ArrowLeftRight size={13} /> Skalakan Resep
+                  </button>
+                )}
               </div>
 
               <div className="overflow-x-auto">
@@ -601,6 +630,66 @@ export default function Resep() {
       )}
 
       <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
+
+      {/* Dialog Skalakan Resep */}
+      {scaleDialog.open && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 w-full max-w-sm">
+            <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800">
+              <div className="flex items-center gap-2">
+                <ArrowLeftRight size={18} className="text-violet-500" />
+                <h2 className="text-base font-bold text-gray-900 dark:text-white">Skalakan Resep</h2>
+              </div>
+              <button onClick={() => setScaleDialog(d => ({ ...d, open: false }))} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+            </div>
+            <div className="p-4 space-y-4">
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Semua qty bahan akan dikalikan dengan rasio <strong>dari ÷ jadi</strong>. HPP otomatis dihitung ulang.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Hasil sebelumnya (pcs)</label>
+                  <input
+                    type="number" min="1" placeholder="Cth: 26" autoFocus
+                    value={scaleDialog.fromPcs}
+                    onChange={(e) => setScaleDialog(d => ({ ...d, fromPcs: e.target.value }))}
+                    className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-violet-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Hasil sekarang (pcs)</label>
+                  <input
+                    type="number" min="1" placeholder="Cth: 25"
+                    value={scaleDialog.toPcs}
+                    onChange={(e) => setScaleDialog(d => ({ ...d, toPcs: e.target.value }))}
+                    className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-violet-500 outline-none"
+                  />
+                </div>
+              </div>
+              {scaleDialog.fromPcs && scaleDialog.toPcs && parseFloat(scaleDialog.fromPcs) > 0 && parseFloat(scaleDialog.toPcs) > 0 && parseFloat(scaleDialog.fromPcs) !== parseFloat(scaleDialog.toPcs) && (
+                <div className="p-3 bg-violet-50 dark:bg-violet-900/20 rounded-xl text-xs text-violet-700 dark:text-violet-300">
+                  Semua qty × {(parseFloat(scaleDialog.fromPcs) / parseFloat(scaleDialog.toPcs)).toFixed(4)}
+                  &nbsp;({scaleDialog.fromPcs} ÷ {scaleDialog.toPcs})
+                  &nbsp;— {recipeItems.length} bahan akan diperbarui
+                </div>
+              )}
+              <div className="flex gap-2 pt-1">
+                <button onClick={() => setScaleDialog(d => ({ ...d, open: false }))} className="flex-1 py-2.5 rounded-xl text-sm border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                  Batal
+                </button>
+                <button
+                  onClick={handleScaleRecipe}
+                  disabled={scaleLoading || !scaleDialog.fromPcs || !scaleDialog.toPcs || parseFloat(scaleDialog.fromPcs) === parseFloat(scaleDialog.toPcs)}
+                  className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium bg-violet-600 hover:bg-violet-700 text-white transition-colors disabled:opacity-50"
+                >
+                  {scaleLoading ? <Loader2 size={15} className="animate-spin" /> : <ArrowLeftRight size={15} />}
+                  Skalakan
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal Edit Bahan Resep */}
       {editingRecipeItem && (
