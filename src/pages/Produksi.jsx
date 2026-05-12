@@ -29,7 +29,7 @@ export default function Produksi() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [tableExists, setTableExists] = useState(true);
 
-  const [formData, setFormData] = useState({ product_id: '', quantity: 1, failed: 0, notes: '' });
+  const [formData, setFormData] = useState({ product_id: '', quantity: 1, failed: 0, notes: '', production_date: new Date().toISOString().split('T')[0] });
   const [formLoading, setFormLoading] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState({ message: '', type: 'success' });
@@ -122,8 +122,8 @@ export default function Produksi() {
       return;
     }
 
-    const bawa   = formData.quantity;
-    const failed = formData.failed || 0;
+    const bawa   = parseInt(formData.quantity) || 0;
+    const failed = parseInt(formData.failed)  || 0;
     const total  = bawa + failed;
 
     const { error: insertError } = await supabase.from('production_logs').insert([{
@@ -131,7 +131,8 @@ export default function Produksi() {
       quantity: bawa,
       failed,
       notes: formData.notes || null,
-      created_by: user?.id
+      created_by: user?.id,
+      production_date: new Date(formData.production_date).toISOString(),
     }]);
 
     if (insertError) {
@@ -152,7 +153,7 @@ export default function Produksi() {
     const hasRecipe = await deductIngredientStock(formData.product_id, total);
 
     setIsModalOpen(false);
-    setFormData({ product_id: '', quantity: 1, failed: 0, notes: '' });
+    setFormData({ product_id: '', quantity: 1, failed: 0, notes: '', production_date: new Date().toISOString().split('T')[0] });
     fetchLogs();
     setFormLoading(false);
 
@@ -356,13 +357,24 @@ export default function Produksi() {
                 </select>
               </div>
 
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Tanggal Produksi</label>
+                <input
+                  type="date" required
+                  value={formData.production_date}
+                  max={new Date().toISOString().split('T')[0]}
+                  onChange={(e) => setFormData({ ...formData, production_date: e.target.value })}
+                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                />
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Berhasil / Bawa (pcs)</label>
                   <input
                     type="number" min="1" required
                     value={formData.quantity}
-                    onChange={(e) => setFormData({ ...formData, quantity: e.target.value === '' ? 1 : parseInt(e.target.value) })}
+                    onChange={(e) => setFormData({ ...formData, quantity: e.target.value === '' ? '' : parseInt(e.target.value) })}
                     className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
                   />
                 </div>
@@ -371,7 +383,7 @@ export default function Produksi() {
                   <input
                     type="number" min="0"
                     value={formData.failed}
-                    onChange={(e) => setFormData({ ...formData, failed: e.target.value === '' ? 0 : parseInt(e.target.value) })}
+                    onChange={(e) => setFormData({ ...formData, failed: e.target.value === '' ? '' : parseInt(e.target.value) })}
                     className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-red-200 dark:border-red-900/40 rounded-xl text-sm focus:border-red-400 outline-none"
                   />
                 </div>

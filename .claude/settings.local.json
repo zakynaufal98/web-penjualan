@@ -3,7 +3,10 @@
     "allow": [
       "Bash(Get-ChildItem -Path \"d:\\\\Pindah X550JX\\\\Projek Portofolio\\\\project-database-penjualan\" -Recurse -File)",
       "Bash(Select-Object -ExpandProperty FullName)",
-      "PowerShell(Get-ChildItem -Path \"d:\\\\Pindah X550JX\\\\Projek Portofolio\\\\project-database-penjualan\" -Recurse -File -Exclude node_modules | Where-Object { $_.FullName -notmatch \"node_modules\" } | Select-Object -ExpandProperty FullName | Sort-Object)"
+      "PowerShell(Get-ChildItem -Path \"d:\\\\Pindah X550JX\\\\Projek Portofolio\\\\project-database-penjualan\" -Recurse -File -Exclude node_modules | Where-Object { $_.FullName -notmatch \"node_modules\" } | Select-Object -ExpandProperty FullName | Sort-Object)",
+      "mcp__gemini-mcp__generate_svg",
+      "Bash(Get-Item \"D:\\\\Pindah X550JX\\\\Projek Portofolio\\\\project-database-penjualan\\\\src\\\\assets\\\\login-illustration.svg\")",
+      "Bash(Select-Object Name, Length)"
     ]
   }
 }

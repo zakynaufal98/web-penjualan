@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Lock, Mail, Loader2, AlertCircle, ArrowRight, Cookie, CheckCircle2 } from 'lucide-react';
+import loginIllustration from '../assets/login-illustration.svg';
 
 const features = [
   'Catat penjualan & produksi harian dengan mudah',
@@ -70,8 +71,8 @@ export default function Login() {
           </div>
 
           {/* Hero copy */}
-          <div className="my-auto py-12">
-            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-fuchsia-400/80 mb-5">
+          <div className="mt-10 mb-4">
+            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-fuchsia-300 mb-5">
               Manajemen Bisnis Kue
             </p>
             <h1 className="text-4xl xl:text-[42px] font-extrabold text-white leading-[1.15] mb-5">
@@ -83,22 +84,47 @@ export default function Login() {
                 lebih cerdas.
               </span>
             </h1>
-            <p className="text-white/45 text-base leading-relaxed mb-10 max-w-sm">
+            <p className="text-white/75 text-base leading-relaxed mb-8 max-w-sm">
               Semua yang Anda butuhkan — dari catatan produksi hingga laporan keuangan — dalam satu dasbor.
             </p>
 
-            <ul className="space-y-3.5">
+            <ul className="space-y-3">
               {features.map((f) => (
                 <li key={f} className="flex items-start gap-3">
                   <CheckCircle2 size={17} className="text-fuchsia-400 mt-0.5 shrink-0" />
-                  <span className="text-[13.5px] text-white/60 leading-snug">{f}</span>
+                  <span className="text-[13.5px] text-white/80 leading-snug">{f}</span>
                 </li>
               ))}
             </ul>
           </div>
 
+          {/* Generative Illustration */}
+          <div className="flex justify-center items-center my-auto">
+            <div
+              className="relative w-full max-w-[340px] rounded-2xl overflow-hidden"
+              style={{
+                background: 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                boxShadow: '0 0 60px rgba(232,121,249,0.12), 0 0 120px rgba(167,139,250,0.08)',
+              }}
+            >
+              <img
+                src={loginIllustration}
+                alt="Ilustrasi manajemen bisnis kue"
+                className="w-full h-auto block"
+                style={{ maxHeight: '280px', objectFit: 'contain' }}
+                draggable={false}
+              />
+              {/* Subtle bottom fade */}
+              <div
+                className="absolute bottom-0 left-0 right-0 h-12 pointer-events-none"
+                style={{ background: 'linear-gradient(to top, #0D0920, transparent)' }}
+              />
+            </div>
+          </div>
+
           {/* Footer */}
-          <p className="text-white/15 text-xs">
+          <p className="text-white/40 text-xs mt-6">
             © {new Date().getFullYear()} Kukis — Dibuat untuk UMKM Indonesia.
           </p>
         </div>
@@ -123,7 +149,7 @@ export default function Login() {
             <h2 className="text-[26px] font-extrabold text-gray-900 dark:text-white leading-tight">
               Selamat datang
             </h2>
-            <p className="text-gray-500 dark:text-gray-400 mt-1.5 text-sm">
+            <p className="text-gray-600 dark:text-gray-300 mt-1.5 text-sm">
               Masuk untuk melanjutkan ke dashboard Anda
             </p>
           </div>
@@ -189,9 +215,9 @@ export default function Login() {
             </button>
           </form>
 
-          <p className="mt-7 text-center text-xs text-gray-400 dark:text-gray-600">
+          <p className="mt-7 text-center text-xs text-gray-500 dark:text-gray-400">
             Belum punya akun?{' '}
-            <span className="text-gray-500 dark:text-gray-400 font-medium">Hubungi admin</span>
+            <span className="text-gray-700 dark:text-gray-200 font-medium">Hubungi admin</span>
             {' '}untuk pendaftaran.
           </p>
         </div>
