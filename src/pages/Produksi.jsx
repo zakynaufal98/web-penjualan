@@ -35,7 +35,7 @@ export default function Produksi() {
   const [error, setError] = useState('');
   const [toast, setToast] = useState({ message: '', type: 'success' });
   const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null });
-  const [konsumsiDialog, setKonsumsiDialog] = useState({ open: false, logId: '', productId: '', nama: '', currentKonsumsi: 0, amount: '' });
+  const [konsumsiDialog, setKonsumsiDialog] = useState({ open: false, logId: '', productId: '', nama: '', currentKonsumsi: 0, amount: '', mode: 'add' });
   const { user } = useStore();
 
   const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
@@ -170,10 +170,19 @@ export default function Produksi() {
       // Sesuaikan stok produk (selisih bawa)
       const { data: currentProduct } = await supabase
         .from('products').select('stock').eq('id', formData.product_id).single();
-      await supabase
+      const { data: stockUpdated } = await supabase
         .from('products')
         .update({ stock: Math.max(0, (currentProduct?.stock || 0) + (newBawa - oldBawa)) })
-        .eq('id', formData.product_id);
+        .eq('id', formData.product_id)
+        .select();
+      if (!stockUpdated || stockUpdated.length === 0) {
+        setToast({ message: 'Data diperbarui tapi stok produk gagal disesuaikan. Jalankan SQL: CREATE POLICY "Allow update products" ON products FOR UPDATE TO authenticated USING (true) WITH CHECK (true);', type: 'error' });
+        setIsModalOpen(false);
+        resetForm();
+        await fetchLogs();
+        setFormLoading(false);
+        return;
+      }
 
       // Sesuaikan stok bahan (selisih total)
       const totalDiff = newTotal - oldTotal;
@@ -200,13 +209,16 @@ export default function Produksi() {
 
       const { data: currentProduct } = await supabase
         .from('products').select('stock').eq('id', formData.product_id).single();
-      await supabase
+      const { data: stockUpdated } = await supabase
         .from('products')
         .update({ stock: (currentProduct?.stock || 0) + newBawa })
-        .eq('id', formData.product_id);
+        .eq('id', formData.product_id)
+        .select();
 
       const hasRecipe = await deductIngredientStock(formData.product_id, newTotal);
-      if (!hasRecipe) {
+      if (!stockUpdated || stockUpdated.length === 0) {
+        setToast({ message: 'Produksi tersimpan tapi stok produk gagal bertambah. Jalankan SQL: CREATE POLICY "Allow update products" ON products FOR UPDATE TO authenticated USING (true) WITH CHECK (true);', type: 'error' });
+      } else if (!hasRecipe) {
         setToast({ message: 'Produksi tersimpan. Resep belum diatur — stok bahan tidak dikurangi.', type: 'info' });
       } else {
         setToast({ message: 'Produksi berhasil dicatat!', type: 'success' });
@@ -220,10 +232,14 @@ export default function Produksi() {
   };
 
   const handleCatatKonsumsi = async () => {
-    const amount = parseInt(konsumsiDialog.amount) || 0;
-    if (amount <= 0) return;
+    const rawAmount = parseInt(konsumsiDialog.amount);
+    if (isNaN(rawAmount) || rawAmount < 0) return;
+    if (konsumsiDialog.mode === 'add' && rawAmount <= 0) return;
 
-    const newKonsumsi = (konsumsiDialog.currentKonsumsi || 0) + amount;
+    const currentKonsumsi = konsumsiDialog.currentKonsumsi || 0;
+    const newKonsumsi = konsumsiDialog.mode === 'edit' ? rawAmount : currentKonsumsi + rawAmount;
+    const stockDiff = newKonsumsi - currentKonsumsi;
+
     const { data: updated, error: updateErr } = await supabase
       .from('production_logs')
       .update({ konsumsi: newKonsumsi })
@@ -231,16 +247,21 @@ export default function Produksi() {
       .select();
 
     if (updateErr || !updated || updated.length === 0) {
-      setToast({ message: 'Gagal mencatat konsumsi. Tambahkan UPDATE policy pada tabel production_logs di Supabase.', type: 'error' });
+      setToast({ message: 'Gagal menyimpan konsumsi. Tambahkan UPDATE policy pada tabel production_logs di Supabase.', type: 'error' });
       setKonsumsiDialog(d => ({ ...d, open: false }));
       return;
     }
 
-    const { data: prod } = await supabase.from('products').select('stock').eq('id', konsumsiDialog.productId).single();
-    await supabase.from('products').update({ stock: Math.max(0, (prod?.stock || 0) - amount) }).eq('id', konsumsiDialog.productId);
+    if (stockDiff !== 0) {
+      const { data: prod } = await supabase.from('products').select('stock').eq('id', konsumsiDialog.productId).single();
+      await supabase.from('products').update({ stock: Math.max(0, (prod?.stock || 0) - stockDiff) }).eq('id', konsumsiDialog.productId);
+    }
 
-    setKonsumsiDialog({ open: false, logId: '', productId: '', nama: '', currentKonsumsi: 0, amount: '' });
-    setToast({ message: `${amount} pcs dicatat sebagai konsumsi sendiri.`, type: 'success' });
+    setKonsumsiDialog({ open: false, logId: '', productId: '', nama: '', currentKonsumsi: 0, amount: '', mode: 'add' });
+    const msg = konsumsiDialog.mode === 'edit'
+      ? (newKonsumsi === 0 ? 'Konsumsi berhasil dihapus.' : `Konsumsi diperbarui menjadi ${newKonsumsi} pcs.`)
+      : `${rawAmount} pcs dicatat sebagai konsumsi sendiri.`;
+    setToast({ message: msg, type: 'success' });
     await fetchLogs();
   };
 
@@ -380,12 +401,21 @@ export default function Produksi() {
                           ? <span className="font-semibold text-orange-500 dark:text-orange-400">{konsumsi} pcs</span>
                           : <span className="text-gray-300 dark:text-gray-600">—</span>}
                         <button
-                          title="Catat Konsumsi"
-                          onClick={() => setKonsumsiDialog({ open: true, logId: log.id, productId: log.product_id, nama: log.products?.name || '', currentKonsumsi: konsumsi, amount: '' })}
+                          title="Tambah Konsumsi"
+                          onClick={() => setKonsumsiDialog({ open: true, logId: log.id, productId: log.product_id, nama: log.products?.name || '', currentKonsumsi: konsumsi, amount: '', mode: 'add' })}
                           className="p-1 text-orange-400 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20 rounded-md transition-colors"
                         >
                           <Plus size={13} />
                         </button>
+                        {konsumsi > 0 && (
+                          <button
+                            title="Edit / Hapus Konsumsi"
+                            onClick={() => setKonsumsiDialog({ open: true, logId: log.id, productId: log.product_id, nama: log.products?.name || '', currentKonsumsi: konsumsi, amount: String(konsumsi), mode: 'edit' })}
+                            className="p-1 text-orange-400 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20 rounded-md transition-colors"
+                          >
+                            <Edit2 size={12} />
+                          </button>
+                        )}
                       </div>
                     </td>
                     <td className="p-4 text-right">
@@ -430,7 +460,9 @@ export default function Produksi() {
             <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800">
               <div className="flex items-center gap-2">
                 <UtensilsCrossed size={18} className="text-orange-500" />
-                <h2 className="text-base font-bold text-gray-900 dark:text-white">Konsumsi Sendiri</h2>
+                <h2 className="text-base font-bold text-gray-900 dark:text-white">
+                  {konsumsiDialog.mode === 'edit' ? 'Edit Konsumsi' : 'Tambah Konsumsi'}
+                </h2>
               </div>
               <button onClick={() => setKonsumsiDialog(d => ({ ...d, open: false }))} className="text-gray-400 hover:text-gray-600">
                 <X size={18} />
@@ -444,23 +476,33 @@ export default function Produksi() {
                 )}
               </p>
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jumlah dikonsumsi (pcs)</label>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                  {konsumsiDialog.mode === 'edit' ? 'Total konsumsi baru (pcs)' : 'Jumlah ditambah (pcs)'}
+                </label>
                 <input
-                  type="number" min="1" autoFocus
+                  type="number" min="0" autoFocus
                   value={konsumsiDialog.amount}
                   onChange={(e) => setKonsumsiDialog(d => ({ ...d, amount: e.target.value === '' ? '' : parseInt(e.target.value) }))}
                   onKeyDown={(e) => e.key === 'Enter' && handleCatatKonsumsi()}
                   className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-orange-200 dark:border-orange-900/40 rounded-xl text-sm focus:border-orange-400 outline-none"
-                  placeholder="Cth: 2"
+                  placeholder={konsumsiDialog.mode === 'edit' ? 'Masukkan total baru' : 'Cth: 2'}
                 />
               </div>
-              <p className="text-xs text-gray-500 dark:text-gray-400">Stok produk akan berkurang sesuai jumlah yang diisi.</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {konsumsiDialog.mode === 'edit'
+                  ? 'Nilai ini menggantikan catatan lama. Masukkan 0 untuk menghapus konsumsi.'
+                  : 'Stok produk akan berkurang sesuai jumlah yang diisi.'}
+              </p>
               <div className="flex gap-2 pt-1">
                 <button onClick={() => setKonsumsiDialog(d => ({ ...d, open: false }))} className="flex-1 py-2.5 rounded-xl text-sm border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
                   Batal
                 </button>
-                <button onClick={handleCatatKonsumsi} disabled={!konsumsiDialog.amount || parseInt(konsumsiDialog.amount) <= 0} className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-orange-500 hover:bg-orange-600 text-white transition-colors disabled:opacity-50">
-                  Catat Konsumsi
+                <button
+                  onClick={handleCatatKonsumsi}
+                  disabled={konsumsiDialog.amount === '' || parseInt(konsumsiDialog.amount) < 0 || (konsumsiDialog.mode === 'add' && parseInt(konsumsiDialog.amount) <= 0)}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-orange-500 hover:bg-orange-600 text-white transition-colors disabled:opacity-50"
+                >
+                  {konsumsiDialog.mode === 'edit' ? 'Simpan Perubahan' : 'Catat Konsumsi'}
                 </button>
               </div>
             </div>

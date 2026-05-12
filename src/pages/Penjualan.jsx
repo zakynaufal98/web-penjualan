@@ -89,7 +89,12 @@ export default function Penjualan() {
     const selectedProduct = products.find(p => p.id === formData.product_id);
     if (!selectedProduct) return;
 
-    if (!editingTransaction && selectedProduct.stock < formData.quantity) {
+    const newQty = parseInt(formData.quantity) || 1;
+    const isSameProduct = editingTransaction && editingTransaction.product_id === formData.product_id;
+    const oldQty = isSameProduct ? editingTransaction.quantity : 0;
+    const stockNeeded = newQty - oldQty;
+
+    if (stockNeeded > 0 && selectedProduct.stock < stockNeeded) {
       setError(`Stok ${selectedProduct.name} tidak mencukupi. Tersedia: ${selectedProduct.stock} pcs`);
       setFormLoading(false);
       return;
@@ -97,7 +102,7 @@ export default function Penjualan() {
 
     const payload = {
       product_id: formData.product_id,
-      quantity: formData.quantity,
+      quantity: newQty,
       unit_price: selectedProduct.selling_price,
       payment_method: formData.payment_method,
       customer_name: formData.customer_name || null,
@@ -111,6 +116,18 @@ export default function Penjualan() {
     if (dbError) {
       setError(friendlyError(dbError));
     } else {
+      if (editingTransaction && !isSameProduct) {
+        const { data: oldProd } = await supabase.from('products').select('stock').eq('id', editingTransaction.product_id).single();
+        if (oldProd) {
+          await supabase.from('products').update({ stock: oldProd.stock + editingTransaction.quantity }).eq('id', editingTransaction.product_id);
+        }
+      }
+      if (stockNeeded !== 0) {
+        const { data: curProd } = await supabase.from('products').select('stock').eq('id', formData.product_id).single();
+        if (curProd) {
+          await supabase.from('products').update({ stock: curProd.stock - stockNeeded }).eq('id', formData.product_id);
+        }
+      }
       setIsModalOpen(false);
       setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: new Date().toISOString().split('T')[0] });
       setToast({ message: editingTransaction ? 'Transaksi berhasil diperbarui!' : 'Penjualan berhasil dicatat!', type: 'success' });
@@ -124,10 +141,17 @@ export default function Penjualan() {
   };
 
   const executeDelete = async (id) => {
+    const trxToDelete = transactions.find(t => t.id === id);
     const { error: delError } = await supabase.from('sales').delete().eq('id', id);
     if (delError) {
       setToast({ message: 'Gagal menghapus transaksi.', type: 'error' });
     } else {
+      if (trxToDelete) {
+        const { data: prodData } = await supabase.from('products').select('stock').eq('id', trxToDelete.product_id).single();
+        if (prodData) {
+          await supabase.from('products').update({ stock: prodData.stock + trxToDelete.quantity }).eq('id', trxToDelete.product_id);
+        }
+      }
       setToast({ message: 'Transaksi berhasil dihapus.', type: 'success' });
       fetchTransactions();
     }
