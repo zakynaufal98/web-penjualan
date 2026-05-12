@@ -58,11 +58,10 @@ export default function Produksi() {
     } else {
       setLogs(data || []);
       setTableExists(true);
-      // Buat map: "productId_yyyy-MM-dd" → total terjual
+      // Buat map: productId → total terjual semua waktu
       const map = {};
       (salesData || []).forEach(s => {
-        const key = `${s.product_id}_${format(new Date(s.transaction_date), 'yyyy-MM-dd')}`;
-        map[key] = (map[key] || 0) + s.quantity;
+        map[s.product_id] = (map[s.product_id] || 0) + s.quantity;
       });
       setSalesMap(map);
     }
@@ -70,7 +69,7 @@ export default function Produksi() {
   };
 
   const fetchProducts = async () => {
-    const { data } = await supabase.from('products').select('id, name').order('name');
+    const { data } = await supabase.from('products').select('id, name, stock').order('name');
     setProducts(data || []);
   };
 
@@ -228,6 +227,7 @@ export default function Produksi() {
     setIsModalOpen(false);
     resetForm();
     fetchLogs();
+    fetchProducts();
     setFormLoading(false);
   };
 
@@ -263,6 +263,7 @@ export default function Produksi() {
       : `${rawAmount} pcs dicatat sebagai konsumsi sendiri.`;
     setToast({ message: msg, type: 'success' });
     await fetchLogs();
+    fetchProducts();
   };
 
   const handleDelete = (id, productId, quantity, failed, konsumsi) => {
@@ -290,6 +291,7 @@ export default function Produksi() {
     }
     setToast({ message: 'Catatan produksi dihapus dan stok dikembalikan.', type: 'success' });
     fetchLogs();
+    fetchProducts();
   };
 
   const today = new Date();
@@ -360,29 +362,33 @@ export default function Produksi() {
                 <th className="p-4 font-medium text-right">Gagal</th>
                 <th className="p-4 font-medium text-right">Terjual</th>
                 <th className="p-4 font-medium text-right">Konsumsi</th>
-                <th className="p-4 font-medium text-right">Sisa</th>
                 <th className="p-4 font-medium">Catatan</th>
                 <th className="p-4 font-medium">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-800 text-sm">
               {loading ? (
-                <tr><td colSpan="9" className="p-8 text-center text-gray-500">Memuat data...</td></tr>
+                <tr><td colSpan="8" className="p-8 text-center text-gray-500">Memuat data...</td></tr>
               ) : logs.length === 0 ? (
-                <tr><td colSpan="9" className="p-8 text-center text-gray-500">Belum ada catatan produksi.</td></tr>
+                <tr><td colSpan="8" className="p-8 text-center text-gray-500">Belum ada catatan produksi.</td></tr>
               ) : (
                 logs.map((log) => {
-                  const dateKey  = format(new Date(log.production_date), 'yyyy-MM-dd');
-                  const terjual  = salesMap[`${log.product_id}_${dateKey}`] || 0;
+                  const terjual  = salesMap[log.product_id] || 0;
                   const konsumsi = log.konsumsi || 0;
-                  const sisa     = Math.max(0, log.quantity - terjual - konsumsi);
+                  const produk   = products.find(p => p.id === log.product_id);
+                  const stokAktual = produk?.stock ?? null;
                   return (
                   <tr key={log.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                       {format(new Date(log.production_date), 'dd MMM yyyy, HH:mm', { locale: localeId })}
                     </td>
-                    <td className="p-4 font-medium text-gray-900 dark:text-gray-100">
-                      {log.products?.name || 'Produk Dihapus'}
+                    <td className="p-4">
+                      <div className="font-medium text-gray-900 dark:text-gray-100">{log.products?.name || 'Produk Dihapus'}</div>
+                      {stokAktual !== null && (
+                        <div className={`text-xs mt-0.5 font-medium ${stokAktual === 0 ? 'text-red-500' : stokAktual <= 5 ? 'text-amber-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                          Stok: {stokAktual} pcs
+                        </div>
+                      )}
                     </td>
                     <td className="p-4 text-right font-bold text-primary-600 dark:text-primary-400">
                       {log.quantity} pcs
@@ -417,11 +423,6 @@ export default function Produksi() {
                           </button>
                         )}
                       </div>
-                    </td>
-                    <td className="p-4 text-right">
-                      <span className={`font-semibold ${sisa > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400'}`}>
-                        {sisa > 0 ? `${sisa} pcs` : <span className="text-emerald-500 text-xs font-medium">Habis</span>}
-                      </span>
                     </td>
                     <td className="p-4 text-gray-500 dark:text-gray-400 text-sm">
                       {log.notes || '-'}
@@ -544,6 +545,8 @@ export default function Produksi() {
                   required
                   value={formData.product_id}
                   onChange={(e) => setFormData({ ...formData, product_id: e.target.value })}
+                  onInvalid={(e) => e.target.setCustomValidity('Silakan pilih produk terlebih dahulu')}
+                  onInput={(e) => e.target.setCustomValidity('')}
                   className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
                 >
                   <option value="">-- Pilih Produk --</option>

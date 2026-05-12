@@ -508,6 +508,8 @@ export default function Resep() {
                           const master = ingredientMasters.find(m => m.id === e.target.value);
                           setNewItem({ ...newItem, ingredient_master_id: e.target.value, unit: master?.base_unit || 'gr' });
                         }}
+                        onInvalid={(e) => e.target.setCustomValidity('Silakan pilih bahan terlebih dahulu')}
+                        onInput={(e) => e.target.setCustomValidity('')}
                         className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:border-primary-500 outline-none"
                       >
                         <option value="">-- Pilih Bahan --</option>

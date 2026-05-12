@@ -86,16 +86,22 @@ export default function Penjualan() {
       return;
     }
 
-    const selectedProduct = products.find(p => p.id === formData.product_id);
-    if (!selectedProduct) return;
+    // Selalu fetch stok terbaru dari DB — hindari stale local state
+    const { data: freshProduct } = await supabase
+      .from('products').select('*').eq('id', formData.product_id).single();
+    if (!freshProduct) {
+      setError('Produk tidak ditemukan.');
+      setFormLoading(false);
+      return;
+    }
 
     const newQty = parseInt(formData.quantity) || 1;
     const isSameProduct = editingTransaction && editingTransaction.product_id === formData.product_id;
     const oldQty = isSameProduct ? editingTransaction.quantity : 0;
     const stockNeeded = newQty - oldQty;
 
-    if (stockNeeded > 0 && selectedProduct.stock < stockNeeded) {
-      setError(`Stok ${selectedProduct.name} tidak mencukupi. Tersedia: ${selectedProduct.stock} pcs`);
+    if (stockNeeded > 0 && freshProduct.stock < stockNeeded) {
+      setError(`Stok ${freshProduct.name} tidak mencukupi. Tersedia: ${freshProduct.stock} pcs`);
       setFormLoading(false);
       return;
     }
@@ -103,7 +109,7 @@ export default function Penjualan() {
     const payload = {
       product_id: formData.product_id,
       quantity: newQty,
-      unit_price: selectedProduct.selling_price,
+      unit_price: freshProduct.selling_price,
       payment_method: formData.payment_method,
       customer_name: formData.customer_name || null,
       transaction_date: new Date(formData.transaction_date).toISOString(),
@@ -116,18 +122,21 @@ export default function Penjualan() {
     if (dbError) {
       setError(friendlyError(dbError));
     } else {
-      if (editingTransaction && !isSameProduct) {
-        const { data: oldProd } = await supabase.from('products').select('stock').eq('id', editingTransaction.product_id).single();
-        if (oldProd) {
-          await supabase.from('products').update({ stock: oldProd.stock + editingTransaction.quantity }).eq('id', editingTransaction.product_id);
+      if (editingTransaction) {
+        // EDIT: trigger tr_reduce_stock tidak aktif pada UPDATE, harus manual
+        if (!isSameProduct) {
+          // Produk diganti: kembalikan stok produk lama, kurangi stok produk baru
+          const { data: oldProd } = await supabase.from('products').select('stock').eq('id', editingTransaction.product_id).single();
+          if (oldProd) {
+            await supabase.from('products').update({ stock: oldProd.stock + editingTransaction.quantity }).eq('id', editingTransaction.product_id);
+          }
+          await supabase.from('products').update({ stock: freshProduct.stock - newQty }).eq('id', formData.product_id);
+        } else if (stockNeeded !== 0) {
+          // Produk sama, qty berubah: sesuaikan selisih saja
+          await supabase.from('products').update({ stock: freshProduct.stock - stockNeeded }).eq('id', formData.product_id);
         }
       }
-      if (stockNeeded !== 0) {
-        const { data: curProd } = await supabase.from('products').select('stock').eq('id', formData.product_id).single();
-        if (curProd) {
-          await supabase.from('products').update({ stock: curProd.stock - stockNeeded }).eq('id', formData.product_id);
-        }
-      }
+      // INSERT: trigger tr_reduce_stock otomatis mengurangi stok — tidak perlu manual
       setIsModalOpen(false);
       setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: new Date().toISOString().split('T')[0] });
       setToast({ message: editingTransaction ? 'Transaksi berhasil diperbarui!' : 'Penjualan berhasil dicatat!', type: 'success' });
@@ -274,7 +283,7 @@ export default function Penjualan() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Pilih Produk</label>
-                <select 
+                <select
                   required
                   value={formData.product_id}
                   onChange={(e) => setFormData({...formData, product_id: e.target.value})}
