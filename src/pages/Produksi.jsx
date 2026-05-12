@@ -224,13 +224,14 @@ export default function Produksi() {
     if (amount <= 0) return;
 
     const newKonsumsi = (konsumsiDialog.currentKonsumsi || 0) + amount;
-    const { error: updateErr } = await supabase
+    const { data: updated, error: updateErr } = await supabase
       .from('production_logs')
       .update({ konsumsi: newKonsumsi })
-      .eq('id', konsumsiDialog.logId);
+      .eq('id', konsumsiDialog.logId)
+      .select();
 
-    if (updateErr) {
-      setToast({ message: 'Gagal mencatat konsumsi. Pastikan kolom konsumsi sudah dibuat di database.', type: 'error' });
+    if (updateErr || !updated || updated.length === 0) {
+      setToast({ message: 'Gagal mencatat konsumsi. Tambahkan UPDATE policy pada tabel production_logs di Supabase.', type: 'error' });
       setKonsumsiDialog(d => ({ ...d, open: false }));
       return;
     }
@@ -240,7 +241,7 @@ export default function Produksi() {
 
     setKonsumsiDialog({ open: false, logId: '', productId: '', nama: '', currentKonsumsi: 0, amount: '' });
     setToast({ message: `${amount} pcs dicatat sebagai konsumsi sendiri.`, type: 'success' });
-    fetchLogs();
+    await fetchLogs();
   };
 
   const handleDelete = (id, productId, quantity, failed, konsumsi) => {
