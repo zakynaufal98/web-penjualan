@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { lazy, Suspense, useState, useEffect } from 'react';
 import {
   TrendingUp,
   DollarSign,
@@ -14,20 +14,30 @@ import {
   PackagePlus
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { 
-  AreaChart, 
-  Area, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer
-} from 'recharts';
 import { supabase } from '../lib/supabase';
-import { format, subDays, isSameDay } from 'date-fns';
+
+const SalesChart = lazy(() => import('../components/dashboard/SalesChart'));
 
 const getExpenseTotal = (expense) =>
   expense.total_price || (['gr', 'ml'].includes(expense.unit) ? expense.unit_price : expense.unit_price * expense.quantity);
+
+const subDaysLocal = (date, days) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() - days);
+  return next;
+};
+
+const toLocalDateKey = (date) => {
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const isSameLocalDay = (a, b) => toLocalDateKey(a) === toLocalDateKey(b);
+
+const dayLabel = (date) => new Intl.DateTimeFormat('id-ID', { weekday: 'short' }).format(date);
 
 const StatCard = ({ title, value, icon: Icon, color, loading }) => (
   <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800 transition-all hover:shadow-md">
@@ -79,7 +89,7 @@ export default function Dashboard() {
   const fetchDashboardData = async () => {
     setLoading(true);
     const today = new Date();
-    const sevenDaysAgo = subDays(today, 6);
+    const sevenDaysAgo = subDaysLocal(today, 6);
 
     // Fetch Sales
     const { data: salesData } = await supabase
@@ -130,20 +140,20 @@ export default function Dashboard() {
       let tProduced = 0;
 
       salesData.forEach(sale => {
-        if (isSameDay(new Date(sale.transaction_date), today)) {
+        if (isSameLocalDay(sale.transaction_date, today)) {
           tSales += sale.total_price || (sale.unit_price * sale.quantity);
           tUnits += sale.quantity;
         }
       });
 
       expensesData.forEach(exp => {
-        if (isSameDay(new Date(exp.purchase_date), today)) {
+        if (isSameLocalDay(exp.purchase_date, today)) {
           tExpenses += getExpenseTotal(exp);
         }
       });
 
       (productionData || []).forEach(log => {
-        if (isSameDay(new Date(log.production_date), today)) {
+        if (isSameLocalDay(log.production_date, today)) {
           tProduced += log.quantity;
         }
       });
@@ -159,23 +169,23 @@ export default function Dashboard() {
       // Calculate Chart Data (Last 7 Days)
       const cData = [];
       for (let i = 6; i >= 0; i--) {
-        const targetDate = subDays(today, i);
+        const targetDate = subDaysLocal(today, i);
         let daySales = 0;
         let dayExpenses = 0;
 
         salesData.forEach(sale => {
-          if (isSameDay(new Date(sale.transaction_date), targetDate)) {
+          if (isSameLocalDay(sale.transaction_date, targetDate)) {
             daySales += sale.total_price || (sale.unit_price * sale.quantity);
           }
         });
         expensesData.forEach(exp => {
-          if (isSameDay(new Date(exp.purchase_date), targetDate)) {
+          if (isSameLocalDay(exp.purchase_date, targetDate)) {
             dayExpenses += getExpenseTotal(exp);
           }
         });
 
         cData.push({
-          name: format(targetDate, 'EEE'), // e.g. "Mon"
+          name: dayLabel(targetDate),
           Penjualan: daySales,
           Keuntungan: daySales - dayExpenses
         });
@@ -351,29 +361,9 @@ export default function Dashboard() {
                 <Loader2 size={32} className="animate-spin text-primary-500" />
               </div>
             ) : (
-              <ResponsiveContainer width="100%" height={320} minWidth={0}>
-                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#d946ef" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="#d946ef" stopOpacity={0}/>
-                    </linearGradient>
-                    <linearGradient id="colorProfit" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#14b8a6" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="#14b8a6" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#374151" opacity={0.2} />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#6b7280' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#6b7280' }} tickFormatter={(val) => `Rp ${val/1000}k`} />
-                  <Tooltip 
-                    contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', backgroundColor: 'rgba(255, 255, 255, 0.9)' }}
-                    formatter={(value) => [`Rp ${value.toLocaleString('id-ID')}`, undefined]}
-                  />
-                  <Area type="monotone" dataKey="Penjualan" stroke="#d946ef" strokeWidth={3} fillOpacity={1} fill="url(#colorSales)" />
-                  <Area type="monotone" dataKey="Keuntungan" stroke="#14b8a6" strokeWidth={3} fillOpacity={1} fill="url(#colorProfit)" />
-                </AreaChart>
-              </ResponsiveContainer>
+              <Suspense fallback={<div className="w-full h-full flex items-center justify-center"><Loader2 size={28} className="animate-spin text-primary-500" /></div>}>
+                <SalesChart data={chartData} />
+              </Suspense>
             )}
           </div>
         </div>

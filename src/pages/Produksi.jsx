@@ -85,7 +85,7 @@ export default function Produksi() {
     });
 
     Object.values(logsByProduct).forEach(productLogs => {
-      productLogs.sort((a, b) => new Date(b.production_date) - new Date(a.production_date));
+      productLogs.sort((a, b) => new Date(a.production_date) - new Date(b.production_date));
     });
 
     [...(salesRows || [])]
