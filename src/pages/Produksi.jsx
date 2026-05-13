@@ -73,6 +73,43 @@ export default function Produksi() {
     );
   }, [isModalOpen, formData.product_id, formData.quantity, formData.failed]);
 
+  const buildProductionAllocations = (productionLogs, salesRows) => {
+    const allocations = {};
+    const logsByProduct = {};
+
+    (productionLogs || []).forEach(log => {
+      const capacity = Math.max(0, (log.quantity || 0) - (log.konsumsi || 0));
+      allocations[log.id] = { sold: 0, remaining: capacity, capacity };
+      if (!logsByProduct[log.product_id]) logsByProduct[log.product_id] = [];
+      logsByProduct[log.product_id].push(log);
+    });
+
+    Object.values(logsByProduct).forEach(productLogs => {
+      productLogs.sort((a, b) => new Date(b.production_date) - new Date(a.production_date));
+    });
+
+    [...(salesRows || [])]
+      .sort((a, b) => new Date(a.transaction_date) - new Date(b.transaction_date))
+      .forEach(sale => {
+        let qtyLeft = sale.quantity || 0;
+        const saleDay = format(new Date(sale.transaction_date), 'yyyy-MM-dd');
+        const candidates = (logsByProduct[sale.product_id] || [])
+          .filter(log => format(new Date(log.production_date), 'yyyy-MM-dd') <= saleDay);
+
+        for (const log of candidates) {
+          if (qtyLeft <= 0) break;
+          const available = allocations[log.id]?.remaining || 0;
+          if (available <= 0) continue;
+          const taken = Math.min(qtyLeft, available);
+          allocations[log.id].sold += taken;
+          allocations[log.id].remaining -= taken;
+          qtyLeft -= taken;
+        }
+      });
+
+    return allocations;
+  };
+
   const fetchLogs = async () => {
     setLoading(true);
     const [{ data, error: fetchError }, { data: salesData }] = await Promise.all([
@@ -83,15 +120,11 @@ export default function Produksi() {
     if (fetchError) {
       setTableExists(false);
     } else {
-      setLogs(data || []);
+      const productionLogs = data || [];
+      setLogs(productionLogs);
       setTableExists(true);
       // Buat map: productId → total terjual semua waktu
-      const map = {};
-      (salesData || []).forEach(s => {
-        const key = `${s.product_id}|${format(new Date(s.transaction_date), 'yyyy-MM-dd')}`;
-        map[key] = (map[key] || 0) + s.quantity;
-      });
-      setSalesMap(map);
+      setSalesMap(buildProductionAllocations(productionLogs, salesData || []));
     }
     setLoading(false);
   };
@@ -476,7 +509,7 @@ export default function Produksi() {
           </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse min-w-[500px]">
+          <table className="w-full text-left border-collapse min-w-[760px]">
             <thead>
               <tr className="bg-gray-50 dark:bg-gray-800/50 text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
                 <th className="p-4 font-medium">Tanggal & Waktu</th>
@@ -485,16 +518,17 @@ export default function Produksi() {
                 <th className="p-4 font-medium text-right">Gagal</th>
                 <th className="p-4 font-medium text-right">Terjual</th>
                 <th className="p-4 font-medium text-right">Konsumsi</th>
+                <th className="p-4 font-medium text-right">Sisa Batch</th>
                 <th className="p-4 font-medium">Catatan</th>
                 <th className="p-4 font-medium">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-800 text-sm">
               {loading ? (
-                <tr><td colSpan="8" className="p-8 text-center text-gray-500">Memuat data...</td></tr>
+                <tr><td colSpan="9" className="p-8 text-center text-gray-500">Memuat data...</td></tr>
               ) : logs.length === 0 ? (
                 <tr>
-                  <td colSpan="8" className="p-10">
+                  <td colSpan="9" className="p-10">
                     <div className="flex flex-col items-center text-center">
                       <ClipboardList size={40} className="text-gray-300 dark:text-gray-600 mb-3" />
                       <p className="font-semibold text-gray-900 dark:text-gray-100">Belum ada catatan produksi</p>
@@ -507,11 +541,10 @@ export default function Produksi() {
                 </tr>
               ) : (
                 logs.map((log) => {
-                  const saleKey = `${log.product_id}|${format(new Date(log.production_date), 'yyyy-MM-dd')}`;
-                  const terjual  = salesMap[saleKey] || 0;
+                  const allocation = salesMap[log.id] || {};
+                  const terjual  = allocation.sold || 0;
                   const konsumsi = log.konsumsi || 0;
-                  const produk   = products.find(p => p.id === log.product_id);
-                  const stokAktual = produk?.stock ?? null;
+                  const sisaBatch = allocation.remaining ?? Math.max(0, (log.quantity || 0) - konsumsi - terjual);
                   return (
                   <tr key={log.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
@@ -519,11 +552,9 @@ export default function Produksi() {
                     </td>
                     <td className="p-4">
                       <div className="font-medium text-gray-900 dark:text-gray-100">{log.products?.name || 'Produk Dihapus'}</div>
-                      {stokAktual !== null && (
-                        <div className={`text-xs mt-0.5 font-medium ${stokAktual === 0 ? 'text-red-500' : stokAktual <= 5 ? 'text-amber-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                          Stok: {stokAktual} pcs
-                        </div>
-                      )}
+                      <div className={`text-xs mt-0.5 font-medium ${sisaBatch === 0 ? 'text-red-500' : sisaBatch <= 5 ? 'text-amber-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                        Sisa batch: {sisaBatch} pcs
+                      </div>
                     </td>
                     <td className="p-4 text-right font-bold text-primary-600 dark:text-primary-400">
                       {log.quantity} pcs
@@ -558,6 +589,11 @@ export default function Produksi() {
                           </button>
                         )}
                       </div>
+                    </td>
+                    <td className="p-4 text-right">
+                      <span className={`font-semibold ${sisaBatch === 0 ? 'text-red-600 dark:text-red-400' : sisaBatch <= 5 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                        {sisaBatch} pcs
+                      </span>
                     </td>
                     <td className="p-4 text-gray-500 dark:text-gray-400 text-sm">
                       {log.notes || '-'}
