@@ -70,6 +70,14 @@ export default function Dashboard() {
     todayUnitsSold: 0,
     todayProduced: 0
   });
+  const [monthlyStats, setMonthlyStats] = useState({
+    sales: 0,
+    expenses: 0,
+    profit: 0,
+    unitsSold: 0,
+    avgSalesPerDay: 0,
+    bestProduct: '-',
+  });
   const [chartData, setChartData] = useState([]);
   const [bestSellers, setBestSellers] = useState([]);
   const [lowStockProducts, setLowStockProducts] = useState([]);
@@ -90,24 +98,26 @@ export default function Dashboard() {
     setLoading(true);
     const today = new Date();
     const sevenDaysAgo = subDaysLocal(today, 6);
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    const fetchStart = monthStart < sevenDaysAgo ? monthStart : sevenDaysAgo;
 
     // Fetch Sales
     const { data: salesData } = await supabase
       .from('sales')
       .select('*, products(name)')
-      .gte('transaction_date', sevenDaysAgo.toISOString());
+      .gte('transaction_date', fetchStart.toISOString());
 
     // Fetch Expenses (Ingredients)
     const { data: expensesData } = await supabase
       .from('ingredients')
       .select('*')
-      .gte('purchase_date', sevenDaysAgo.toISOString());
+      .gte('purchase_date', fetchStart.toISOString());
 
     // Fetch Production Logs (optional — table may not exist yet)
     const { data: productionData } = await supabase
       .from('production_logs')
       .select('quantity, production_date')
-      .gte('production_date', sevenDaysAgo.toISOString());
+      .gte('production_date', fetchStart.toISOString());
 
     const [
       { data: productStockData },
@@ -138,17 +148,34 @@ export default function Dashboard() {
       let tExpenses = 0;
       let tUnits = 0;
       let tProduced = 0;
+      let mSales = 0;
+      let mExpenses = 0;
+      let mUnits = 0;
+      const monthlyProductMap = {};
 
       salesData.forEach(sale => {
+        const saleTotal = sale.total_price || (sale.unit_price * sale.quantity);
         if (isSameLocalDay(sale.transaction_date, today)) {
-          tSales += sale.total_price || (sale.unit_price * sale.quantity);
+          tSales += saleTotal;
           tUnits += sale.quantity;
+        }
+        if (new Date(sale.transaction_date) >= monthStart) {
+          const pName = sale.products?.name || 'Produk Dihapus';
+          mSales += saleTotal;
+          mUnits += sale.quantity;
+          if (!monthlyProductMap[pName]) monthlyProductMap[pName] = { name: pName, sales: 0, revenue: 0 };
+          monthlyProductMap[pName].sales += sale.quantity;
+          monthlyProductMap[pName].revenue += saleTotal;
         }
       });
 
       expensesData.forEach(exp => {
+        const expenseTotal = getExpenseTotal(exp);
         if (isSameLocalDay(exp.purchase_date, today)) {
-          tExpenses += getExpenseTotal(exp);
+          tExpenses += expenseTotal;
+        }
+        if (new Date(exp.purchase_date) >= monthStart) {
+          mExpenses += expenseTotal;
         }
       });
 
@@ -164,6 +191,16 @@ export default function Dashboard() {
         todayProfit: tSales - tExpenses,
         todayUnitsSold: tUnits,
         todayProduced: tProduced
+      });
+
+      const monthlyBest = Object.values(monthlyProductMap).sort((a, b) => b.revenue - a.revenue)[0];
+      setMonthlyStats({
+        sales: mSales,
+        expenses: mExpenses,
+        profit: mSales - mExpenses,
+        unitsSold: mUnits,
+        avgSalesPerDay: Math.round(mSales / today.getDate()),
+        bestProduct: monthlyBest ? `${monthlyBest.name} (${monthlyBest.sales} pcs)` : '-',
       });
 
       // Calculate Chart Data (Last 7 Days)
@@ -288,6 +325,32 @@ export default function Dashboard() {
           icon={Package}
           color="amber"
         />
+      </div>
+
+      <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+          <div>
+            <h2 className="text-base font-bold text-gray-900 dark:text-white">Performance Bulan Ini</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400">Ringkasan dari tanggal 1 sampai hari ini.</p>
+          </div>
+          <button onClick={() => navigate('/laporan')} className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700">
+            Lihat laporan <ArrowRight size={13} />
+          </button>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+          {[
+            { label: 'Omzet', value: `Rp ${monthlyStats.sales.toLocaleString('id-ID')}`, tone: 'text-gray-900 dark:text-white' },
+            { label: 'Laba', value: `Rp ${monthlyStats.profit.toLocaleString('id-ID')}`, tone: monthlyStats.profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400' },
+            { label: 'Terjual', value: `${monthlyStats.unitsSold} pcs`, tone: 'text-blue-600 dark:text-blue-400' },
+            { label: 'Rata-rata / hari', value: `Rp ${monthlyStats.avgSalesPerDay.toLocaleString('id-ID')}`, tone: 'text-violet-600 dark:text-violet-400' },
+            { label: 'Produk teratas', value: monthlyStats.bestProduct, tone: 'text-gray-900 dark:text-white' },
+          ].map(item => (
+            <div key={item.label} className="rounded-xl bg-gray-50 dark:bg-gray-800 px-4 py-3 min-w-0">
+              <p className="text-xs text-gray-500 dark:text-gray-400">{item.label}</p>
+              <p className={`mt-1 text-sm font-bold truncate ${item.tone}`}>{loading ? '-' : item.value}</p>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
