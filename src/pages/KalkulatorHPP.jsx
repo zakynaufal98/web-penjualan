@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Calculator, Plus, Trash2, Save, ArrowRight, Search, X, Check } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
@@ -146,6 +147,8 @@ const IngredientCombobox = ({ item, ingredients, onSelect, placement = 'bottom' 
 
 export default function KalkulatorHPP() {
   const draft = loadDraft();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   const [ingredients, setIngredients] = useState([]);
   const [products, setProducts] = useState([]);
@@ -169,6 +172,15 @@ export default function KalkulatorHPP() {
     fetchIngredients();
     fetchProducts();
   }, []);
+
+  useEffect(() => {
+    const productId = location.state?.productId;
+    if (!productId || products.length === 0) return;
+    const product = products.find(p => p.id === productId);
+    setSelectedProductId(productId);
+    if (product && !recipeName) setRecipeName(product.name);
+    navigate('/hpp', { replace: true, state: null });
+  }, [location.state, products, recipeName, navigate]);
 
   // Auto-save draft ke localStorage setiap ada perubahan
   useEffect(() => {

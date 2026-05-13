@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { BookOpen, Plus, Trash2, AlertCircle, Loader2, PackageSearch, Package, Edit2, X, ArrowLeftRight, Search, Check } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import { friendlyError } from '../lib/errorUtils';
@@ -113,6 +114,8 @@ const IngredientMasterPicker = ({ masters, value, onChange, formatQty, placement
 };
 
 export default function Resep() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('resep');
   const [products, setProducts] = useState([]);
   const [ingredientMasters, setIngredientMasters] = useState([]);
@@ -366,6 +369,14 @@ export default function Resep() {
     fetchIngredientMasters();
     fetchIngredientPrices();
   }, []);
+
+  useEffect(() => {
+    const productId = location.state?.productId;
+    if (!productId || products.length === 0) return;
+    setActiveTab('resep');
+    setSelectedProductId(productId);
+    navigate('/resep', { replace: true, state: null });
+  }, [location.state, products, navigate]);
 
   useEffect(() => {
     if (selectedProductId) {
@@ -700,7 +711,14 @@ export default function Resep() {
           </div>
           <div className="overflow-x-auto">
             {ingredientMasters.length === 0 ? (
-              <div className="p-8 text-center text-gray-400 text-sm">Belum ada data bahan baku.</div>
+              <div className="p-10 text-center">
+                <PackageSearch size={40} className="mx-auto text-gray-300 dark:text-gray-600 mb-3" />
+                <p className="font-semibold text-gray-900 dark:text-gray-100">Belum ada data bahan baku</p>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Catat pembelian bahan terlebih dahulu agar stok bisa dipantau.</p>
+                <button onClick={() => navigate('/modal')} className="mt-4 inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors">
+                  <Plus size={15} /> Tambah Pembelian
+                </button>
+              </div>
             ) : (
               <table className="w-full text-left border-collapse min-w-[500px]">
                 <thead>

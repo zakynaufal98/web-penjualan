@@ -493,7 +493,18 @@ export default function Produksi() {
               {loading ? (
                 <tr><td colSpan="8" className="p-8 text-center text-gray-500">Memuat data...</td></tr>
               ) : logs.length === 0 ? (
-                <tr><td colSpan="8" className="p-8 text-center text-gray-500">Belum ada catatan produksi.</td></tr>
+                <tr>
+                  <td colSpan="8" className="p-10">
+                    <div className="flex flex-col items-center text-center">
+                      <ClipboardList size={40} className="text-gray-300 dark:text-gray-600 mb-3" />
+                      <p className="font-semibold text-gray-900 dark:text-gray-100">Belum ada catatan produksi</p>
+                      <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Catat produksi pertama agar stok produk dan bahan mulai tersinkron.</p>
+                      <button onClick={() => { resetForm(); setIsModalOpen(true); }} className="mt-4 inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors">
+                        <Plus size={15} /> Catat Produksi
+                      </button>
+                    </div>
+                  </td>
+                </tr>
               ) : (
                 logs.map((log) => {
                   const saleKey = `${log.product_id}|${format(new Date(log.production_date), 'yyyy-MM-dd')}`;

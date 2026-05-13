@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Search, Plus, Edit2, Trash2, X, Loader2, AlertCircle, Package, Check } from 'lucide-react';
+import { Search, Plus, Edit2, Trash2, X, Loader2, AlertCircle, Package, Check, ShoppingCart } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
@@ -466,7 +466,16 @@ export default function Penjualan() {
                 </tr>
               ) : transactions.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-gray-500">Belum ada transaksi. Silakan tambahkan.</td>
+                  <td colSpan="7" className="p-10">
+                    <div className="flex flex-col items-center text-center">
+                      <ShoppingCart size={40} className="text-gray-300 dark:text-gray-600 mb-3" />
+                      <p className="font-semibold text-gray-900 dark:text-gray-100">Belum ada transaksi</p>
+                      <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Gunakan kasir cepat di atas atau tambah transaksi lengkap.</p>
+                      <button onClick={openAdd} className="mt-4 inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors">
+                        <Plus size={15} /> Tambah Penjualan
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ) : (
                 transactions.filter(t => t.products?.name?.toLowerCase().includes(searchTerm.toLowerCase())).map((trx) => (

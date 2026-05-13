@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Search, Plus, AlertTriangle, X, Loader2, AlertCircle, Edit2, Trash2, ImageIcon, Upload, ClipboardList } from 'lucide-react';
+import { Search, Plus, AlertTriangle, X, Loader2, AlertCircle, Edit2, Trash2, ImageIcon, Upload, ClipboardList, BookOpen, Calculator, PackagePlus } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { uploadProductImage } from '../lib/uploadImage';
@@ -148,6 +148,15 @@ export default function Produk() {
     return 'Stok manual';
   };
 
+  const getProductReadiness = (product) => {
+    const hasRecipe = recipeProductIds.has(product.id);
+    const hasHpp = (product.cost_price || 0) > 0;
+    if (hasRecipe && hasHpp) return { label: 'Data lengkap', className: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300' };
+    if (!hasRecipe && !hasHpp) return { label: 'Butuh resep & HPP', className: 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300' };
+    if (!hasRecipe) return { label: 'Belum ada resep', className: 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300' };
+    return { label: 'HPP belum dihitung', className: 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300' };
+  };
+
   const filteredProducts = products
     .filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()) || (p.category || '').toLowerCase().includes(searchTerm.toLowerCase()))
     .filter(p => {
@@ -225,13 +234,21 @@ export default function Produk() {
       {loading ? (
         <div className="p-8 text-center text-gray-500">Memuat data produk...</div>
       ) : products.length === 0 ? (
-        <div className="p-8 text-center text-gray-500">Belum ada produk. Silakan tambahkan produk pertama Anda.</div>
+        <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 p-10 text-center shadow-sm">
+          <PackagePlus className="mx-auto text-gray-300 dark:text-gray-600 mb-3" size={42} />
+          <h2 className="font-bold text-gray-900 dark:text-gray-100">Belum ada produk</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Tambahkan produk pertama untuk mulai membuat resep, produksi, dan penjualan.</p>
+          <button onClick={openAdd} className="mt-4 inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors">
+            <Plus size={16} /> Tambah Produk
+          </button>
+        </div>
       ) : filteredProducts.length === 0 ? (
         <div className="p-8 text-center text-gray-500">Tidak ada produk yang cocok dengan filter ini.</div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
           {filteredProducts.map((product) => {
             const stockStatus = getStockStatus(product);
+            const readiness = getProductReadiness(product);
             return (
             <div key={product.id} className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden group hover:shadow-md transition-shadow">
               <div className="relative h-48 overflow-hidden bg-gray-100 dark:bg-gray-800">
@@ -275,6 +292,11 @@ export default function Produk() {
                 </div>
                 
                 <div className="mt-4 space-y-2">
+                  <div className="flex flex-wrap gap-2">
+                    <span className={`inline-flex px-2 py-1 rounded-lg text-xs font-medium ${readiness.className}`}>
+                      {readiness.label}
+                    </span>
+                  </div>
                   <div className="flex justify-between items-center text-sm">
                     <span className="text-gray-500">Harga Jual</span>
                     <span className="font-medium text-gray-900 dark:text-gray-100">Rp {product.selling_price.toLocaleString('id-ID')}</span>
@@ -300,6 +322,22 @@ export default function Produk() {
                       className="inline-flex items-center gap-1 text-primary-600 hover:text-primary-700 font-medium"
                     >
                       <ClipboardList size={13} /> Produksi
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => navigate('/resep', { state: { productId: product.id } })}
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-300 hover:text-primary-600 transition-colors"
+                    >
+                      <BookOpen size={13} /> Resep
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/hpp', { state: { productId: product.id } })}
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-300 hover:text-primary-600 transition-colors"
+                    >
+                      <Calculator size={13} /> HPP
                     </button>
                   </div>
                 </div>

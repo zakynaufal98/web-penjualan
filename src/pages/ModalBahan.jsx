@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Search, Plus, Trash2, X, Loader2, AlertCircle, Camera, Image as ImageIcon, TrendingDown, TrendingUp, Minus, Lightbulb, BarChart2, Edit2 } from 'lucide-react';
+import { Search, Plus, Trash2, X, Loader2, AlertCircle, Camera, Image as ImageIcon, TrendingDown, TrendingUp, Minus, Lightbulb, BarChart2, Edit2, Wallet } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import { friendlyError } from '../lib/errorUtils';
@@ -508,7 +508,16 @@ export default function ModalBahan() {
                 </tr>
               ) : ingredients.length === 0 ? (
                 <tr>
-                  <td colSpan="8" className="p-8 text-center text-gray-500">Belum ada riwayat pembelian.</td>
+                  <td colSpan="8" className="p-10">
+                    <div className="flex flex-col items-center text-center">
+                      <Wallet size={40} className="text-gray-300 dark:text-gray-600 mb-3" />
+                      <p className="font-semibold text-gray-900 dark:text-gray-100">Belum ada riwayat pembelian</p>
+                      <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Catat pembelian bahan agar stok dan HPP bisa dihitung otomatis.</p>
+                      <button onClick={() => setIsModalOpen(true)} className="mt-4 inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors">
+                        <Plus size={15} /> Tambah Pembelian
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ) : (
                 ingredients.filter(i => i.name.toLowerCase().includes(searchTerm.toLowerCase())).map((item) => (

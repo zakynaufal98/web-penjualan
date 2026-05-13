@@ -4,8 +4,16 @@ import {
   DollarSign,
   ShoppingBag,
   Package,
-  Loader2
+  Loader2,
+  CheckCircle2,
+  Circle,
+  ArrowRight,
+  ClipboardList,
+  Wallet,
+  BookOpen,
+  PackagePlus
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { 
   AreaChart, 
   Area, 
@@ -43,6 +51,7 @@ const StatCard = ({ title, value, icon: Icon, color, loading }) => (
 );
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
     todaySales: 0,
@@ -55,6 +64,13 @@ export default function Dashboard() {
   const [bestSellers, setBestSellers] = useState([]);
   const [lowStockProducts, setLowStockProducts] = useState([]);
   const [lowStockIngredients, setLowStockIngredients] = useState([]);
+  const [setupStatus, setSetupStatus] = useState({
+    products: false,
+    ingredients: false,
+    recipes: false,
+    production: false,
+    sales: false,
+  });
 
   useEffect(() => {
     fetchDashboardData();
@@ -83,12 +99,28 @@ export default function Dashboard() {
       .select('quantity, production_date')
       .gte('production_date', sevenDaysAgo.toISOString());
 
-    const [{ data: productStockData }, { data: ingredientStockData }] = await Promise.all([
-      supabase.from('products').select('name, stock').eq('is_available', true).lte('stock', 5).order('stock', { ascending: true }).limit(5),
+    const [
+      { data: productStockData },
+      { data: ingredientStockData },
+      { data: allProducts },
+      { data: allIngredientMasters },
+      { data: recipeRows },
+    ] = await Promise.all([
+      supabase.from('products').select('id, name, stock, cost_price').eq('is_available', true).lte('stock', 5).order('stock', { ascending: true }).limit(5),
       supabase.from('ingredient_masters').select('name, current_stock, min_stock, unit').gt('min_stock', 0).order('current_stock', { ascending: true }).limit(8),
+      supabase.from('products').select('id, cost_price').eq('is_available', true),
+      supabase.from('ingredient_masters').select('id').limit(1),
+      supabase.from('recipes').select('product_id'),
     ]);
     setLowStockProducts(productStockData || []);
     setLowStockIngredients((ingredientStockData || []).filter(item => item.current_stock <= item.min_stock).slice(0, 5));
+    setSetupStatus({
+      products: (allProducts || []).length > 0,
+      ingredients: (allIngredientMasters || []).length > 0 || (expensesData || []).length > 0,
+      recipes: (recipeRows || []).length > 0,
+      production: (productionData || []).length > 0,
+      sales: (salesData || []).length > 0,
+    });
 
     if (salesData && expensesData) {
       // Calculate Today's Stats
@@ -169,6 +201,16 @@ export default function Dashboard() {
     setLoading(false);
   };
 
+  const setupTasks = [
+    { id: 'products', label: 'Tambah produk', path: '/produk', icon: PackagePlus },
+    { id: 'ingredients', label: 'Catat bahan', path: '/modal', icon: Wallet },
+    { id: 'recipes', label: 'Buat resep', path: '/resep', icon: BookOpen },
+    { id: 'production', label: 'Catat produksi', path: '/produksi', icon: ClipboardList },
+    { id: 'sales', label: 'Catat penjualan', path: '/penjualan', icon: ShoppingBag },
+  ];
+  const completedSetup = setupTasks.filter(task => setupStatus[task.id]).length;
+  const setupComplete = completedSetup === setupTasks.length;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -177,6 +219,35 @@ export default function Dashboard() {
           <p className="text-gray-500 dark:text-gray-400 mt-1">Pantau performa bisnis Kukis Anda dari data asli.</p>
         </div>
       </div>
+
+      {!setupComplete && (
+        <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-bold text-gray-900 dark:text-white">Checklist Mulai Pakai</h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{completedSetup} dari {setupTasks.length} langkah selesai.</p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 flex-1">
+              {setupTasks.map(task => {
+                const done = setupStatus[task.id];
+                const Icon = task.icon;
+                return (
+                  <button
+                    key={task.id}
+                    type="button"
+                    onClick={() => navigate(task.path)}
+                    className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs transition-colors ${done ? 'border-emerald-100 bg-emerald-50 text-emerald-700 dark:border-emerald-900/30 dark:bg-emerald-900/20 dark:text-emerald-300' : 'border-gray-100 bg-gray-50 text-gray-600 hover:border-primary-200 hover:text-primary-600 dark:border-gray-800 dark:bg-gray-800 dark:text-gray-300'}`}
+                  >
+                    {done ? <CheckCircle2 size={15} className="shrink-0" /> : <Circle size={15} className="shrink-0" />}
+                    <Icon size={14} className="shrink-0" />
+                    <span className="font-medium">{task.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
       
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
         <StatCard 
@@ -209,8 +280,7 @@ export default function Dashboard() {
         />
       </div>
 
-      {(lowStockProducts.length > 0 || lowStockIngredients.length > 0) && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
             <h2 className="text-sm font-bold text-gray-900 dark:text-white mb-3">Produk Perlu Restock</h2>
             {lowStockProducts.length === 0 ? (
@@ -225,6 +295,9 @@ export default function Dashboard() {
                 ))}
               </div>
             )}
+            <button onClick={() => navigate('/produksi')} className="mt-4 inline-flex items-center gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700">
+              Catat produksi <ArrowRight size={13} />
+            </button>
           </div>
           <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
             <h2 className="text-sm font-bold text-gray-900 dark:text-white mb-3">Bahan Perlu Dibeli</h2>
@@ -240,20 +313,45 @@ export default function Dashboard() {
                 ))}
               </div>
             )}
+            <button onClick={() => navigate('/modal')} className="mt-4 inline-flex items-center gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700">
+              Belanja bahan <ArrowRight size={13} />
+            </button>
           </div>
-        </div>
-      )}
+          <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
+            <h2 className="text-sm font-bold text-gray-900 dark:text-white mb-3">Aksi Cepat Hari Ini</h2>
+            <div className="space-y-2">
+              {[
+                { label: 'Catat penjualan', path: '/penjualan', icon: ShoppingBag },
+                { label: 'Hitung HPP produk', path: '/hpp', icon: DollarSign },
+                { label: 'Atur resep', path: '/resep', icon: BookOpen },
+              ].map(action => {
+                const Icon = action.icon;
+                return (
+                  <button
+                    key={action.path}
+                    type="button"
+                    onClick={() => navigate(action.path)}
+                    className="w-full flex items-center justify-between rounded-xl bg-gray-50 dark:bg-gray-800 px-3 py-2.5 text-sm text-gray-700 dark:text-gray-300 hover:text-primary-600 dark:hover:text-primary-400 transition-colors"
+                  >
+                    <span className="flex items-center gap-2"><Icon size={15} /> {action.label}</span>
+                    <ArrowRight size={14} />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
+        <div className="lg:col-span-2 min-w-0 bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
           <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-6">Grafik Penjualan & Keuntungan (7 Hari Terakhir)</h2>
-          <div className="h-80 w-full">
+          <div className="h-80 min-h-80 w-full min-w-0">
             {loading ? (
               <div className="w-full h-full flex items-center justify-center">
                 <Loader2 size={32} className="animate-spin text-primary-500" />
               </div>
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height={320} minWidth={0}>
                 <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                   <defs>
                     <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
