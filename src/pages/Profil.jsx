@@ -1,12 +1,21 @@
 import { User, Mail, Shield, LogOut } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { supabase } from '../lib/supabase';
+import { useState } from 'react';
+import Toast from '../components/ui/Toast';
 
 export default function Profil() {
-  const { user } = useStore();
+  const { user, profileName, setProfileName } = useStore();
+  const [name, setName] = useState(profileName || 'Admin Kukis');
+  const [toast, setToast] = useState({ message: '', type: 'success' });
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
+  };
+
+  const handleSave = () => {
+    setProfileName(name.trim() || 'Admin Kukis');
+    setToast({ message: 'Profil berhasil disimpan.', type: 'success' });
   };
 
   return (
@@ -22,7 +31,7 @@ export default function Profil() {
             <User size={48} />
           </div>
           <div className="text-center sm:text-left">
-            <h2 className="text-xl font-bold text-gray-900 dark:text-white">Admin Kukis</h2>
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white">{profileName || 'Admin Kukis'}</h2>
             <p className="text-gray-500 dark:text-gray-400 flex items-center justify-center sm:justify-start gap-2 mt-1">
               <Mail size={16} /> {user?.email || 'admin@cakefinance.com'}
             </p>
@@ -35,7 +44,12 @@ export default function Profil() {
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Nama Lengkap</label>
-            <input type="text" defaultValue="Admin Kukis" className="w-full px-4 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500 transition-colors" />
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full px-4 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500 transition-colors"
+            />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>
@@ -44,7 +58,7 @@ export default function Profil() {
         </div>
 
         <div className="mt-8 flex flex-col sm:flex-row gap-4">
-          <button className="flex-1 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors">
+          <button onClick={handleSave} className="flex-1 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors">
             Simpan Perubahan
           </button>
           <button onClick={handleLogout} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-900/20 dark:hover:bg-red-900/30 dark:text-red-400 px-6 py-2.5 rounded-xl text-sm font-medium transition-colors">
@@ -53,6 +67,7 @@ export default function Profil() {
           </button>
         </div>
       </div>
+      <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
     </div>
   );
 }

@@ -4,7 +4,6 @@ import {
   DollarSign,
   ShoppingBag,
   Package,
-  CreditCard,
   Loader2
 } from 'lucide-react';
 import { 
@@ -18,6 +17,9 @@ import {
 } from 'recharts';
 import { supabase } from '../lib/supabase';
 import { format, subDays, isSameDay } from 'date-fns';
+
+const getExpenseTotal = (expense) =>
+  expense.total_price || (['gr', 'ml'].includes(expense.unit) ? expense.unit_price : expense.unit_price * expense.quantity);
 
 const StatCard = ({ title, value, icon: Icon, color, loading }) => (
   <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800 transition-all hover:shadow-md">
@@ -51,6 +53,8 @@ export default function Dashboard() {
   });
   const [chartData, setChartData] = useState([]);
   const [bestSellers, setBestSellers] = useState([]);
+  const [lowStockProducts, setLowStockProducts] = useState([]);
+  const [lowStockIngredients, setLowStockIngredients] = useState([]);
 
   useEffect(() => {
     fetchDashboardData();
@@ -79,6 +83,13 @@ export default function Dashboard() {
       .select('quantity, production_date')
       .gte('production_date', sevenDaysAgo.toISOString());
 
+    const [{ data: productStockData }, { data: ingredientStockData }] = await Promise.all([
+      supabase.from('products').select('name, stock').eq('is_available', true).lte('stock', 5).order('stock', { ascending: true }).limit(5),
+      supabase.from('ingredient_masters').select('name, current_stock, min_stock, unit').gt('min_stock', 0).order('current_stock', { ascending: true }).limit(8),
+    ]);
+    setLowStockProducts(productStockData || []);
+    setLowStockIngredients((ingredientStockData || []).filter(item => item.current_stock <= item.min_stock).slice(0, 5));
+
     if (salesData && expensesData) {
       // Calculate Today's Stats
       let tSales = 0;
@@ -95,7 +106,7 @@ export default function Dashboard() {
 
       expensesData.forEach(exp => {
         if (isSameDay(new Date(exp.purchase_date), today)) {
-          tExpenses += exp.total_price || (exp.unit_price * exp.quantity);
+          tExpenses += getExpenseTotal(exp);
         }
       });
 
@@ -127,7 +138,7 @@ export default function Dashboard() {
         });
         expensesData.forEach(exp => {
           if (isSameDay(new Date(exp.purchase_date), targetDate)) {
-            dayExpenses += exp.total_price || (exp.unit_price * exp.quantity);
+            dayExpenses += getExpenseTotal(exp);
           }
         });
 
@@ -197,6 +208,41 @@ export default function Dashboard() {
           color="amber"
         />
       </div>
+
+      {(lowStockProducts.length > 0 || lowStockIngredients.length > 0) && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
+            <h2 className="text-sm font-bold text-gray-900 dark:text-white mb-3">Produk Perlu Restock</h2>
+            {lowStockProducts.length === 0 ? (
+              <p className="text-sm text-gray-500">Stok produk aman.</p>
+            ) : (
+              <div className="space-y-2">
+                {lowStockProducts.map(item => (
+                  <div key={item.name} className="flex justify-between text-sm">
+                    <span className="font-medium text-gray-800 dark:text-gray-100">{item.name}</span>
+                    <span className={item.stock <= 0 ? 'text-red-500 font-semibold' : 'text-amber-500 font-semibold'}>{item.stock} pcs</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
+            <h2 className="text-sm font-bold text-gray-900 dark:text-white mb-3">Bahan Perlu Dibeli</h2>
+            {lowStockIngredients.length === 0 ? (
+              <p className="text-sm text-gray-500">Stok bahan aman.</p>
+            ) : (
+              <div className="space-y-2">
+                {lowStockIngredients.map(item => (
+                  <div key={item.name} className="flex justify-between text-sm">
+                    <span className="font-medium text-gray-800 dark:text-gray-100">{item.name}</span>
+                    <span className="text-amber-500 font-semibold">{item.current_stock} / {item.min_stock} {item.unit}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
@@ -270,7 +316,11 @@ export default function Dashboard() {
             <div className="bg-primary-50 dark:bg-primary-900/10 p-4 rounded-xl border border-primary-100 dark:border-primary-900/30">
               <p className="text-sm text-primary-800 dark:text-primary-300 leading-relaxed">
                 <strong className="block mb-1">Rekomendasi Pintar:</strong>
-                {bestSellers.length > 0 
+                {lowStockProducts.length > 0
+                  ? `Produk ${lowStockProducts[0].name} sedang menipis. Prioritaskan produksi ulang sebelum mencatat promosi atau pesanan baru.`
+                  : lowStockIngredients.length > 0
+                    ? `Bahan ${lowStockIngredients[0].name} sudah mendekati batas minimum. Pertimbangkan belanja ulang agar produksi tidak tertahan.`
+                    : bestSellers.length > 0 
                   ? `Produk ${bestSellers[0].name} adalah yang paling laris minggu ini. Pastikan stok bahan bakunya selalu tersedia untuk memaksimalkan keuntungan!`
                   : `Ayo mulai catat penjualan pertamamu untuk mendapatkan rekomendasi bisnis otomatis dari AI.`
                 }

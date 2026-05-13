@@ -7,6 +7,7 @@ import ConfirmDialog from '../components/ui/ConfirmDialog';
 import { uploadToImgBB } from '../lib/uploadImgBB';
 import { format } from 'date-fns';
 import { id as localeId } from 'date-fns/locale';
+import { dateInputToLocalISOString, todayInputValue } from '../lib/dateUtils';
 
 export default function ModalBahan() {
   const [activeTab, setActiveTab] = useState('riwayat');
@@ -22,7 +23,7 @@ export default function ModalBahan() {
   const [transactionInfo, setTransactionInfo] = useState({
     supplier: '',
     receipt_url: '',
-    purchase_date: new Date().toISOString().split('T')[0]
+    purchase_date: todayInputValue()
   });
 
   // Current Item Form State
@@ -45,6 +46,7 @@ export default function ModalBahan() {
     content_count: '', content_weight: '', items_per_unit: '', base_unit: 'gr'
   });
   const [originalEditQty, setOriginalEditQty] = useState(0);
+  const [originalEditItem, setOriginalEditItem] = useState(null);
 
   const [formLoading, setFormLoading] = useState(false);
   const [isUploadingReceipt, setIsUploadingReceipt] = useState(false);
@@ -55,6 +57,24 @@ export default function ModalBahan() {
   const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null });
   const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
   const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
+  const getItemTotal = (item) =>
+    ['gr', 'ml'].includes(item.unit) ? item.unit_price : item.quantity * item.unit_price;
+  const cartTotal = cart.reduce((sum, item) => sum + getItemTotal(item), 0);
+  const ingredientSuggestions = useMemo(() => {
+    const q = currentItem.name.trim().toLowerCase();
+    if (!q) return [];
+
+    const uniqueIngredients = Object.values(ingredients.reduce((acc, curr) => {
+      if (!acc[curr.name.toLowerCase()]) acc[curr.name.toLowerCase()] = curr;
+      return acc;
+    }, {}));
+
+    return uniqueIngredients
+      .filter(ing => [ing.name, ing.category, ing.supplier, ing.unit]
+        .filter(Boolean)
+        .some(value => String(value).toLowerCase().includes(q)))
+      .slice(0, 8);
+  }, [currentItem.name, ingredients]);
 
   useEffect(() => {
     fetchIngredients();
@@ -119,7 +139,7 @@ export default function ModalBahan() {
       items_per_unit: item.items_per_unit ? parseFloat(item.items_per_unit) : null,
       base_unit: item.items_per_unit ? item.base_unit : null,
       receipt_url: transactionInfo.receipt_url || null,
-      purchase_date: new Date(transactionInfo.purchase_date).toISOString()
+      purchase_date: dateInputToLocalISOString(transactionInfo.purchase_date)
     }));
 
     const { error: insertError } = await supabase.from('ingredients').insert(insertData);
@@ -158,7 +178,7 @@ export default function ModalBahan() {
 
     setIsModalOpen(false);
     setCart([]);
-    setTransactionInfo({ supplier: '', receipt_url: '', purchase_date: new Date().toISOString().split('T')[0] });
+    setTransactionInfo({ supplier: '', receipt_url: '', purchase_date: todayInputValue() });
     setToast({ message: `${cart.length} bahan berhasil disimpan!`, type: 'success' });
     fetchIngredients();
     setFormLoading(false);
@@ -202,7 +222,7 @@ export default function ModalBahan() {
       name: item.name,
       category: item.category,
       supplier: item.supplier || '',
-      purchase_date: item.purchase_date ? item.purchase_date.split('T')[0] : new Date().toISOString().split('T')[0],
+      purchase_date: item.purchase_date ? item.purchase_date.split('T')[0] : todayInputValue(),
       quantity: item.quantity,
       unit: item.unit,
       unit_price: item.unit_price,
@@ -212,6 +232,7 @@ export default function ModalBahan() {
       base_unit: item.base_unit || 'gr'
     });
     setOriginalEditQty(item.quantity);
+    setOriginalEditItem(item);
     setIsEditModalOpen(true);
   };
 
@@ -233,33 +254,81 @@ export default function ModalBahan() {
         unit_price: editFormData.unit_price,
         items_per_unit: itemsPerUnit,
         base_unit: itemsPerUnit ? editFormData.base_unit : null,
-        purchase_date: new Date(editFormData.purchase_date).toISOString()
+        purchase_date: dateInputToLocalISOString(editFormData.purchase_date)
       })
       .eq('id', editFormData.id);
 
     if (dbError) {
       setError(friendlyError(dbError));
     } else {
-      // Sync ingredient_masters: adjust stok (selisih qty) + update items_per_unit
-      const { data: master } = await supabase
-        .from('ingredient_masters')
-        .select('id, current_stock')
-        .eq('name', editFormData.name.trim())
-        .maybeSingle();
+      const oldName = originalEditItem?.name?.trim() || editFormData.name.trim();
+      const newName = editFormData.name.trim();
 
-      if (master) {
-        const qtyDiff = editFormData.quantity - originalEditQty;
-        await supabase
+      if (oldName.toLowerCase() === newName.toLowerCase()) {
+        const { data: master } = await supabase
           .from('ingredient_masters')
-          .update({
-            current_stock: Math.max(0, (master.current_stock || 0) + qtyDiff),
-            items_per_unit: itemsPerUnit,
-            base_unit: itemsPerUnit ? editFormData.base_unit : null,
-          })
-          .eq('id', master.id);
+          .select('id, current_stock')
+          .eq('name', newName)
+          .maybeSingle();
+
+        if (master) {
+          const qtyDiff = editFormData.quantity - originalEditQty;
+          await supabase
+            .from('ingredient_masters')
+            .update({
+              current_stock: Math.max(0, (master.current_stock || 0) + qtyDiff),
+              category: editFormData.category,
+              unit: editFormData.unit,
+              items_per_unit: itemsPerUnit,
+              base_unit: itemsPerUnit ? editFormData.base_unit : null,
+            })
+            .eq('id', master.id);
+        }
+      } else {
+        const { data: oldMaster } = await supabase
+          .from('ingredient_masters')
+          .select('id, current_stock')
+          .eq('name', oldName)
+          .maybeSingle();
+        if (oldMaster) {
+          await supabase
+            .from('ingredient_masters')
+            .update({ current_stock: Math.max(0, (oldMaster.current_stock || 0) - originalEditQty) })
+            .eq('id', oldMaster.id);
+        }
+
+        const { data: newMaster } = await supabase
+          .from('ingredient_masters')
+          .select('id, current_stock')
+          .eq('name', newName)
+          .maybeSingle();
+        if (newMaster) {
+          await supabase
+            .from('ingredient_masters')
+            .update({
+              current_stock: (newMaster.current_stock || 0) + editFormData.quantity,
+              category: editFormData.category,
+              unit: editFormData.unit,
+              items_per_unit: itemsPerUnit,
+              base_unit: itemsPerUnit ? editFormData.base_unit : null,
+            })
+            .eq('id', newMaster.id);
+        } else {
+          await supabase
+            .from('ingredient_masters')
+            .insert({
+              name: newName,
+              category: editFormData.category,
+              unit: editFormData.unit,
+              current_stock: editFormData.quantity,
+              items_per_unit: itemsPerUnit,
+              base_unit: itemsPerUnit ? editFormData.base_unit : null,
+            });
+        }
       }
 
       setIsEditModalOpen(false);
+      setOriginalEditItem(null);
       setToast({ message: 'Data pembelian berhasil diperbarui!', type: 'success' });
       fetchIngredients();
     }
@@ -360,6 +429,7 @@ export default function ModalBahan() {
     } catch (err) {
       console.error(err);
       setUploadFailed(true);
+      setError(err?.message || 'Upload struk gagal. Periksa konfigurasi ImgBB.');
     } finally {
       setIsUploadingReceipt(false);
       URL.revokeObjectURL(objectUrl);
@@ -746,16 +816,18 @@ export default function ModalBahan() {
                         className="w-full px-4 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:border-primary-500 outline-none"
                       />
                       {showSuggestions && currentItem.name && (
-                        <div className="absolute z-10 w-full mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg max-h-48 overflow-y-auto">
-                          {Object.values(ingredients.reduce((acc, curr) => {
-                            if (!acc[curr.name.toLowerCase()]) acc[curr.name.toLowerCase()] = curr;
-                            return acc;
-                          }, {}))
-                            .filter(ing => ing.name.toLowerCase().includes(currentItem.name.toLowerCase()))
-                            .map(ing => (
-                              <div
+                        <div className="absolute z-50 w-full mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl shadow-black/10 max-h-64 overflow-y-auto">
+                          {ingredientSuggestions.length === 0 ? (
+                            <div className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">
+                              Bahan belum pernah dicatat.
+                            </div>
+                          ) : (
+                            ingredientSuggestions.map(ing => (
+                              <button
                                 key={ing.id}
-                                className="px-4 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer text-sm border-b border-gray-50 dark:border-gray-800/50 last:border-0"
+                                type="button"
+                                onMouseDown={(e) => e.preventDefault()}
+                                className="w-full px-4 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-800 text-left text-sm border-b border-gray-50 dark:border-gray-800/50 last:border-0"
                                 onClick={() => {
                                   setCurrentItem({
                                     ...currentItem,
@@ -776,8 +848,9 @@ export default function ModalBahan() {
                                   {ing.category} • Rp {ing.unit_price.toLocaleString('id-ID')} / {ing.unit}
                                   {ing.items_per_unit ? ` · ${ing.items_per_unit}${ing.base_unit}/${ing.unit}` : ''}
                                 </div>
-                              </div>
-                            ))}
+                              </button>
+                            ))
+                          )}
                         </div>
                       )}
                     </div>
@@ -941,7 +1014,7 @@ export default function ModalBahan() {
                               </div>
                             </td>
                             <td className="p-3 text-right text-gray-700 dark:text-gray-300">{item.quantity} {item.unit}</td>
-                            <td className="p-3 text-right font-medium text-gray-900 dark:text-gray-100">Rp {(item.quantity * item.unit_price).toLocaleString('id-ID')}</td>
+                            <td className="p-3 text-right font-medium text-gray-900 dark:text-gray-100">Rp {getItemTotal(item).toLocaleString('id-ID')}</td>
                             <td className="p-3 text-right">
                               <button onClick={() => removeFromCart(item.id)} className="text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 p-1.5 rounded-md">
                                 <Trash2 size={14} />
@@ -951,6 +1024,10 @@ export default function ModalBahan() {
                         ))}
                       </tbody>
                     </table>
+                    <div className="flex items-center justify-between bg-primary-50 dark:bg-primary-900/20 px-3 py-3 border-t border-primary-100 dark:border-primary-900/30">
+                      <span className="text-sm font-semibold text-primary-700 dark:text-primary-300">Total Belanja</span>
+                      <span className="text-sm font-bold text-primary-700 dark:text-primary-300">Rp {cartTotal.toLocaleString('id-ID')}</span>
+                    </div>
                   </div>
                 </div>
               )}

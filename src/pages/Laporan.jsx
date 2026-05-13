@@ -1,19 +1,24 @@
 import { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
-import { Calendar, Loader2, ChevronLeft, ChevronRight, Copy, Check, BarChart2 } from 'lucide-react';
+import { Calendar, Loader2, ChevronLeft, ChevronRight, Copy, Check, BarChart2, FileSpreadsheet, FileText } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useStore } from '../store/useStore';
 import {
   getMonth, parseISO, startOfYear, endOfYear,
   startOfWeek, addDays, subDays, format, subWeeks, addWeeks,
 } from 'date-fns';
+import { localDayRangeISO, localWeekRangeISO } from '../lib/dateUtils';
 
 const DAY_NAMES = ['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
 const MONTHS    = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+const getExpenseTotal = (expense) =>
+  expense.total_price || (['gr', 'ml'].includes(expense.unit) ? expense.unit_price : expense.unit_price * expense.quantity);
 
 export default function Laporan() {
   const { bankInfo } = useStore();
   const [activeTab, setActiveTab] = useState('bulanan');
+  const [products, setProducts] = useState([]);
+  const [productFilter, setProductFilter] = useState('');
 
   // ── Monthly ──
   const [loading, setLoading]         = useState(true);
@@ -35,9 +40,15 @@ export default function Laporan() {
   const [dayLoading, setDayLoading]     = useState(false);
   const [dayCopied, setDayCopied]       = useState(false);
 
+  useEffect(() => { fetchProducts(); }, []);
   useEffect(() => { if (activeTab === 'bulanan') fetchReportData(); }, [year, activeTab]);
-  useEffect(() => { if (activeTab === 'rekap')   fetchWeeklyReport(); }, [weekStart, activeTab]);
-  useEffect(() => { if (activeTab === 'harian')  fetchDailyReport(); }, [selectedDay, activeTab]);
+  useEffect(() => { if (activeTab === 'rekap')   fetchWeeklyReport(); }, [weekStart, activeTab, productFilter]);
+  useEffect(() => { if (activeTab === 'harian')  fetchDailyReport(); }, [selectedDay, activeTab, productFilter]);
+
+  const fetchProducts = async () => {
+    const { data } = await supabase.from('products').select('id, name').order('name');
+    setProducts(data || []);
+  };
 
   const fetchReportData = async () => {
     setLoading(true);
@@ -60,7 +71,7 @@ export default function Laporan() {
     });
     (expData || []).forEach(exp => {
       const m = getMonth(parseISO(exp.purchase_date));
-      byMonth[m].expenses += exp.total_price || exp.unit_price * exp.quantity;
+      byMonth[m].expenses += getExpenseTotal(exp);
     });
 
     let marginSum = 0, activeMonths = 0;
@@ -82,9 +93,7 @@ export default function Laporan() {
 
   const fetchWeeklyReport = async () => {
     setWeekLoading(true);
-    const weekEnd = addDays(weekStart, 6);
-    const startISO = weekStart.toISOString();
-    const endISO   = new Date(weekEnd.getFullYear(), weekEnd.getMonth(), weekEnd.getDate(), 23, 59, 59).toISOString();
+    const { startISO, endISO } = localWeekRangeISO(weekStart);
 
     const [{ data: prodData }, { data: salesData }] = await Promise.all([
       supabase.from('production_logs').select('*, products(name, selling_price)').gte('production_date', startISO).lte('production_date', endISO),
@@ -95,8 +104,8 @@ export default function Laporan() {
       const day = addDays(weekStart, i);
       const key = format(day, 'yyyy-MM-dd');
 
-      const dayProd  = (prodData  || []).filter(p => format(parseISO(p.production_date),  'yyyy-MM-dd') === key);
-      const daySales = (salesData || []).filter(s => format(parseISO(s.transaction_date), 'yyyy-MM-dd') === key);
+      const dayProd  = (prodData  || []).filter(p => format(parseISO(p.production_date),  'yyyy-MM-dd') === key && (!productFilter || p.product_id === productFilter));
+      const daySales = (salesData || []).filter(s => format(parseISO(s.transaction_date), 'yyyy-MM-dd') === key && (!productFilter || s.product_id === productFilter));
 
       const map = {};
       dayProd.forEach(p => {
@@ -149,8 +158,7 @@ export default function Laporan() {
   const fetchDailyReport = async () => {
     setDayLoading(true);
     const key     = format(selectedDay, 'yyyy-MM-dd');
-    const startISO = `${key}T00:00:00.000Z`;
-    const endISO   = `${key}T23:59:59.999Z`;
+    const { startISO, endISO } = localDayRangeISO(key);
 
     const [{ data: prodData }, { data: salesData }] = await Promise.all([
       supabase.from('production_logs').select('*, products(name, selling_price)').gte('production_date', startISO).lte('production_date', endISO),
@@ -158,14 +166,14 @@ export default function Laporan() {
     ]);
 
     const map = {};
-    (prodData || []).forEach(p => {
+    (prodData || []).filter(p => !productFilter || p.product_id === productFilter).forEach(p => {
       const name = p.products?.name || 'Produk';
       if (!map[name]) map[name] = { name, bawa: 0, gagal: 0, terjual: 0, total: 0, hasProd: false };
       map[name].bawa  += p.quantity;
       map[name].gagal += p.failed || 0;
       map[name].hasProd = true;
     });
-    (salesData || []).forEach(s => {
+    (salesData || []).filter(s => !productFilter || s.product_id === productFilter).forEach(s => {
       const name = s.products?.name || 'Produk';
       if (!map[name]) map[name] = { name, bawa: 0, terjual: 0, total: 0, hasProd: false };
       map[name].terjual += s.quantity;
@@ -205,6 +213,45 @@ export default function Laporan() {
     return ((stats.profitThisMonth - stats.profitLastMonth) / stats.profitLastMonth) * 100;
   };
 
+  const handleExportExcel = async () => {
+    const XLSX = await import('xlsx');
+    const rows = activeTab === 'bulanan'
+      ? monthlyData.map(row => ({ Bulan: row.name, Penjualan: row.sales, Pengeluaran: row.expenses, Profit: row.profit, Margin: row.margin }))
+      : activeTab === 'harian'
+        ? dayReport.map(row => ({ Produk: row.name, Bawa: row.bawa, Gagal: row.gagal || 0, Terjual: row.terjual, Sisa: row.sisa ?? '', Total: row.total }))
+        : weekReport.flatMap(day => day.items.map(row => ({ Tanggal: format(day.day, 'yyyy-MM-dd'), Hari: day.dayName, Produk: row.name, Bawa: row.bawa, Gagal: row.gagal || 0, Terjual: row.terjual, Sisa: row.sisa ?? '', Total: row.total })));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Laporan');
+    XLSX.writeFile(wb, `laporan-${activeTab}-${format(new Date(), 'yyyy-MM-dd')}.xlsx`);
+  };
+
+  const handleExportPDF = async () => {
+    const { jsPDF } = await import('jspdf');
+    const doc = new jsPDF();
+    const title = `Laporan ${activeTab} - ${format(new Date(), 'yyyy-MM-dd')}`;
+    const text = activeTab === 'harian'
+      ? generateDayText()
+      : activeTab === 'rekap'
+        ? generateText()
+        : monthlyData.map(row => `${row.name}: penjualan Rp ${row.sales.toLocaleString('id-ID')}, pengeluaran Rp ${row.expenses.toLocaleString('id-ID')}, profit Rp ${row.profit.toLocaleString('id-ID')}`).join('\n');
+
+    doc.setFontSize(14);
+    doc.text(title, 14, 16);
+    doc.setFontSize(10);
+    const lines = doc.splitTextToSize(text || 'Tidak ada data.', 180);
+    let y = 28;
+    lines.forEach(line => {
+      if (y > 280) {
+        doc.addPage();
+        y = 16;
+      }
+      doc.text(line, 14, y);
+      y += 6;
+    });
+    doc.save(`laporan-${activeTab}-${format(new Date(), 'yyyy-MM-dd')}.pdf`);
+  };
+
   const weekLabel = `${format(weekStart, 'd MMM')} – ${format(addDays(weekStart, 6), 'd MMM yyyy')}`;
 
   return (
@@ -235,7 +282,39 @@ export default function Laporan() {
         ))}
       </div>
 
-      {/* ── TAB BULANAN ── */}
+
+      <div className="flex flex-col sm:flex-row gap-3 sm:items-center justify-between">
+        {activeTab !== 'bulanan' ? (
+          <select
+            value={productFilter}
+            onChange={(e) => setProductFilter(e.target.value)}
+            className="w-full sm:w-72 px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500"
+          >
+            <option value="">Semua produk</option>
+            {products.map(product => (
+              <option key={product.id} value={product.id}>{product.name}</option>
+            ))}
+          </select>
+        ) : <span />}
+        <div className="flex gap-2">
+          <button
+            onClick={handleExportExcel}
+            disabled={activeTab === 'bulanan' ? monthlyData.length === 0 : activeTab === 'harian' ? dayReport.length === 0 : weekReport.every(d => !d.hasData)}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+          >
+            <FileSpreadsheet size={16} /> Excel
+          </button>
+          <button
+            onClick={handleExportPDF}
+            disabled={activeTab === 'bulanan' ? monthlyData.length === 0 : activeTab === 'harian' ? dayReport.length === 0 : weekReport.every(d => !d.hasData)}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
+          >
+            <FileText size={16} /> PDF
+          </button>
+        </div>
+      </div>
+
+      {/* -- TAB BULANAN -- */}
       {activeTab === 'bulanan' && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -324,6 +403,13 @@ export default function Laporan() {
             </div>
           </div>
 
+          {dayTotal > 0 && (
+            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 p-4">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Preview teks salin</p>
+              <pre className="whitespace-pre-wrap text-xs text-gray-600 dark:text-gray-300 leading-relaxed max-h-36 overflow-y-auto">{generateDayText()}</pre>
+            </div>
+          )}
+
           {dayLoading ? (
             <div className="flex justify-center py-16"><Loader2 className="animate-spin text-primary-500" size={32} /></div>
           ) : dayReport.length === 0 ? (
@@ -399,6 +485,13 @@ export default function Laporan() {
               {copied ? <><Check size={16} /> Tersalin!</> : <><Copy size={16} /> Salin Laporan</>}
             </button>
           </div>
+
+          {weekTotal > 0 && (
+            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 p-4">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Preview teks salin</p>
+              <pre className="whitespace-pre-wrap text-xs text-gray-600 dark:text-gray-300 leading-relaxed max-h-40 overflow-y-auto">{generateText()}</pre>
+            </div>
+          )}
 
           {weekLoading ? (
             <div className="flex justify-center py-16"><Loader2 className="animate-spin text-primary-500" size={32} /></div>

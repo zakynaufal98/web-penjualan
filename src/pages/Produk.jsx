@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Search, Plus, AlertTriangle, X, Loader2, AlertCircle, Edit2, Trash2, ImageIcon, Upload } from 'lucide-react';
+import { Search, Plus, AlertTriangle, X, Loader2, AlertCircle, Edit2, Trash2, ImageIcon, Upload, ClipboardList } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { uploadProductImage } from '../lib/uploadImage';
 import Toast from '../components/ui/Toast';
@@ -8,7 +9,10 @@ import { friendlyError } from '../lib/errorUtils';
 
 export default function Produk() {
   const [searchTerm, setSearchTerm] = useState('');
+  const [stockFilter, setStockFilter] = useState('all');
   const [products, setProducts] = useState([]);
+  const [recipeProductIds, setRecipeProductIds] = useState(new Set());
+  const [productionProductIds, setProductionProductIds] = useState(new Set());
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
@@ -21,6 +25,7 @@ export default function Produk() {
   const [error, setError] = useState('');
   const [toast, setToast] = useState({ message: '', type: 'success' });
   const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null });
+  const navigate = useNavigate();
   const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
   const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
 
@@ -30,15 +35,22 @@ export default function Produk() {
 
   const fetchProducts = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from('products')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const [
+      { data, error },
+      { data: recipes },
+      { data: productionLogs },
+    ] = await Promise.all([
+      supabase.from('products').select('*').order('created_at', { ascending: false }),
+      supabase.from('recipes').select('product_id'),
+      supabase.from('production_logs').select('product_id'),
+    ]);
     
     if (error) {
       console.error(error);
     } else {
       setProducts(data || []);
+      setRecipeProductIds(new Set((recipes || []).map(item => item.product_id)));
+      setProductionProductIds(new Set((productionLogs || []).map(item => item.product_id)));
     }
     setLoading(false);
   };
@@ -124,6 +136,33 @@ export default function Produk() {
     }
   };
 
+  const getStockStatus = (product) => {
+    if ((product.stock || 0) <= 0) return { id: 'empty', label: 'Habis', className: 'bg-red-100/90 text-red-700' };
+    if ((product.stock || 0) <= 5) return { id: 'low', label: 'Perlu produksi', className: 'bg-amber-100/90 text-amber-700' };
+    return { id: 'ready', label: 'Tersedia', className: 'bg-emerald-100/90 text-emerald-700' };
+  };
+
+  const getStockSource = (product) => {
+    if (productionProductIds.has(product.id)) return 'Stok dari produksi';
+    if (recipeProductIds.has(product.id)) return 'Siap dikelola produksi';
+    return 'Stok manual';
+  };
+
+  const filteredProducts = products
+    .filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()) || (p.category || '').toLowerCase().includes(searchTerm.toLowerCase()))
+    .filter(p => {
+      if (stockFilter === 'empty') return (p.stock || 0) <= 0;
+      if (stockFilter === 'low') return (p.stock || 0) > 0 && (p.stock || 0) <= 5;
+      if (stockFilter === 'ready') return (p.stock || 0) > 5;
+      return true;
+    });
+
+  const productStats = {
+    total: products.length,
+    low: products.filter(p => (p.stock || 0) > 0 && (p.stock || 0) <= 5).length,
+    empty: products.filter(p => (p.stock || 0) <= 0).length,
+  };
+
   return (
     <div className="space-y-4 sm:space-y-6">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -140,7 +179,20 @@ export default function Produk() {
         </button>
       </div>
 
-      <div className="flex flex-col sm:flex-row gap-4 items-center justify-between">
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { label: 'Total Produk', value: productStats.total, className: 'text-gray-900 dark:text-white' },
+          { label: 'Menipis', value: productStats.low, className: 'text-amber-600 dark:text-amber-400' },
+          { label: 'Habis', value: productStats.empty, className: 'text-red-600 dark:text-red-400' },
+        ].map(stat => (
+          <div key={stat.label} className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 p-4 shadow-sm">
+            <p className="text-xs text-gray-500 dark:text-gray-400">{stat.label}</p>
+            <p className={`mt-1 text-2xl font-bold ${stat.className}`}>{stat.value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex flex-col lg:flex-row gap-3 lg:items-center lg:justify-between">
         <div className="relative w-full sm:w-80">
           <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
           <input 
@@ -151,15 +203,36 @@ export default function Produk() {
             className="w-full pl-10 pr-4 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 rounded-xl text-sm outline-none transition-all shadow-sm"
           />
         </div>
+        <div className="flex gap-1 bg-white dark:bg-gray-900 rounded-xl p-1 border border-gray-100 dark:border-gray-800 shadow-sm overflow-x-auto">
+          {[
+            { id: 'all', label: 'Semua' },
+            { id: 'ready', label: 'Tersedia' },
+            { id: 'low', label: 'Menipis' },
+            { id: 'empty', label: 'Habis' },
+          ].map(filter => (
+            <button
+              key={filter.id}
+              type="button"
+              onClick={() => setStockFilter(filter.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${stockFilter === filter.id ? 'bg-primary-600 text-white' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
+            >
+              {filter.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {loading ? (
         <div className="p-8 text-center text-gray-500">Memuat data produk...</div>
       ) : products.length === 0 ? (
         <div className="p-8 text-center text-gray-500">Belum ada produk. Silakan tambahkan produk pertama Anda.</div>
+      ) : filteredProducts.length === 0 ? (
+        <div className="p-8 text-center text-gray-500">Tidak ada produk yang cocok dengan filter ini.</div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-          {products.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase())).map((product) => (
+          {filteredProducts.map((product) => {
+            const stockStatus = getStockStatus(product);
+            return (
             <div key={product.id} className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden group hover:shadow-md transition-shadow">
               <div className="relative h-48 overflow-hidden bg-gray-100 dark:bg-gray-800">
                 {(() => {
@@ -180,10 +253,8 @@ export default function Produk() {
                   );
                 })()}
                 <div className="absolute top-3 right-3">
-                  <span className={`px-2.5 py-1 rounded-full text-xs font-medium shadow-sm backdrop-blur-md
-                    ${product.stock > 10 ? 'bg-emerald-100/90 text-emerald-700' : 
-                      product.stock > 0 ? 'bg-amber-100/90 text-amber-700' : 'bg-red-100/90 text-red-700'}`}>
-                    {product.stock > 10 ? 'Tersedia' : product.stock > 0 ? 'Menipis' : 'Habis'}
+                  <span className={`px-2.5 py-1 rounded-full text-xs font-medium shadow-sm backdrop-blur-md ${stockStatus.className}`}>
+                    {stockStatus.label}
                   </span>
                 </div>
               </div>
@@ -210,7 +281,7 @@ export default function Produk() {
                   </div>
                   <div className="flex justify-between items-center text-sm">
                     <span className="text-gray-500">Harga Modal</span>
-                    <span className="font-medium text-gray-500">Rp {product.cost_price.toLocaleString('id-ID')}</span>
+                    <span className="font-medium text-gray-500">Rp {(product.cost_price || 0).toLocaleString('id-ID')}</span>
                   </div>
                   <div className="flex justify-between items-center text-sm pt-2 border-t border-gray-100 dark:border-gray-800">
                     <span className="text-gray-500">Stok Tersisa</span>
@@ -221,10 +292,21 @@ export default function Produk() {
                       </span>
                     </div>
                   </div>
+                  <div className="flex items-center justify-between gap-2 text-xs pt-2 border-t border-gray-100 dark:border-gray-800">
+                    <span className="text-gray-500">{getStockSource(product)}</span>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/produksi', { state: { productId: product.id } })}
+                      className="inline-flex items-center gap-1 text-primary-600 hover:text-primary-700 font-medium"
+                    >
+                      <ClipboardList size={13} /> Produksi
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

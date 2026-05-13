@@ -16,8 +16,23 @@ export const useStore = create(
       user: null,
       setUser: (user) => set({ user }),
 
+      profileName: 'Admin Kukis',
+      setProfileName: (profileName) => set({ profileName }),
+
       bankInfo: { bank: '', owner: '', number: '' },
       setBankInfo: (info) => set({ bankInfo: info }),
+
+      notificationSettings: {
+        lowStock: true,
+        productLowStockThreshold: 5,
+        ingredientLowStock: true,
+        largeExpense: true,
+        largeExpenseThreshold: 1000000,
+      },
+      setNotificationSettings: (settings) =>
+        set((state) => ({
+          notificationSettings: { ...state.notificationSettings, ...settings },
+        })),
     }),
     {
       name: 'kukis-storage',

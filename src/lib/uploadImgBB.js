@@ -8,9 +8,10 @@ import imageCompression from 'browser-image-compression';
 export const uploadToImgBB = async (file) => {
   if (!file) throw new Error("File tidak ditemukan");
 
-  // GANTI DENGAN API KEY IMGBB ANDA
-  // Dapatkan gratis di: https://api.imgbb.com/
-  const IMGBB_API_KEY = "26a7f624e16111128fa94b310b9a9c79";
+  const imgbbApiKey = import.meta.env.VITE_IMGBB_API_KEY;
+  if (!imgbbApiKey) {
+    throw new Error("VITE_IMGBB_API_KEY belum dikonfigurasi");
+  }
 
   try {
     // 1. Opsi Kompresi Gambar
@@ -27,7 +28,7 @@ export const uploadToImgBB = async (file) => {
     // 3. Siapkan FormData untuk dikirim ke API ImgBB
     const formData = new FormData();
     formData.append("image", compressedFile);
-    formData.append("key", IMGBB_API_KEY);
+    formData.append("key", imgbbApiKey);
 
     // 4. Proses Upload ke ImgBB
     const response = await fetch("https://api.imgbb.com/1/upload", {

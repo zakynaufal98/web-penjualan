@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Calculator, Plus, Trash2, Save, ArrowRight } from 'lucide-react';
+import { Calculator, Plus, Trash2, Save, ArrowRight, Search, X, Check } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
@@ -13,6 +13,135 @@ const loadDraft = () => {
   } catch {
     return null;
   }
+};
+
+const getBaseUnit = (ingredient) => {
+  if (!ingredient) return 'gr';
+  if (ingredient.items_per_unit && ingredient.base_unit) return ingredient.base_unit;
+  if (ingredient.unit === 'kg') return 'gr';
+  if (ingredient.unit === 'liter') return 'ml';
+  return ingredient.unit || 'gr';
+};
+
+const getDisplayPrice = (ingredient) => {
+  if (!ingredient) return { price: 0, unit: 'gr' };
+  if (ingredient.items_per_unit && ingredient.base_unit) {
+    return { price: ingredient.unit_price / ingredient.items_per_unit, unit: ingredient.base_unit };
+  }
+  if (ingredient.unit === 'kg') return { price: ingredient.unit_price / 1000, unit: 'gr' };
+  if (ingredient.unit === 'liter') return { price: ingredient.unit_price / 1000, unit: 'ml' };
+  if (ingredient.unit === 'gr' || ingredient.unit === 'ml') {
+    return { price: ingredient.quantity > 0 ? ingredient.unit_price / ingredient.quantity : 0, unit: ingredient.unit };
+  }
+  return { price: ingredient.unit_price, unit: ingredient.unit };
+};
+
+const IngredientCombobox = ({ item, ingredients, onSelect, placement = 'bottom' }) => {
+  const selected = ingredients.find(i => i.id === item.ingredient_id);
+  const [query, setQuery] = useState(selected?.name || '');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    setQuery(selected?.name || '');
+  }, [selected?.id, selected?.name]);
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = ingredients
+    .filter(ing => {
+      if (!normalizedQuery) return true;
+      return [
+        ing.name,
+        ing.category,
+        ing.supplier,
+        ing.unit,
+        ing.base_unit,
+      ].filter(Boolean).some(value => String(value).toLowerCase().includes(normalizedQuery));
+    })
+    .slice(0, 8);
+
+  return (
+    <div className="relative">
+      <div className={`flex items-center gap-2 bg-white dark:bg-gray-900 border rounded-lg transition-colors ${open ? 'border-primary-500 ring-2 ring-primary-500/10' : 'border-gray-200 dark:border-gray-700'}`}>
+        <Search size={15} className="ml-3 text-gray-400 shrink-0" />
+        <input
+          type="text"
+          value={query}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 120)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          placeholder="Ketik nama bahan..."
+          className="w-full min-w-0 bg-transparent py-2 pr-1 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 outline-none"
+        />
+        {selected && (
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              onSelect(null);
+              setQuery('');
+              setOpen(true);
+            }}
+            className="mr-2 p-1 text-gray-400 hover:text-red-500 rounded-md"
+            aria-label="Kosongkan bahan"
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className={`absolute z-50 w-full overflow-hidden rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl shadow-black/10 ${placement === 'top' ? 'bottom-full mb-2' : 'mt-2'}`}>
+          {ingredients.length === 0 ? (
+            <div className="p-4 text-sm text-gray-500 dark:text-gray-400">
+              Belum ada bahan. Catat pembelian bahan dulu di Modal Bahan.
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="p-4 text-sm text-gray-500 dark:text-gray-400">
+              Tidak ada bahan yang cocok.
+            </div>
+          ) : (
+            <div className="max-h-64 overflow-y-auto py-1">
+              {filtered.map(ing => {
+                const price = getDisplayPrice(ing);
+                const isSelected = ing.id === item.ingredient_id;
+                return (
+                  <button
+                    key={ing.id}
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      onSelect(ing);
+                      setQuery(ing.name);
+                      setOpen(false);
+                    }}
+                    className="w-full px-3 py-2.5 text-left hover:bg-primary-50 dark:hover:bg-primary-900/20 transition-colors"
+                  >
+                    <div className="flex items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{ing.name}</span>
+                          {isSelected && <Check size={14} className="text-primary-600 shrink-0" />}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+                          <span>{ing.category || 'Tanpa kategori'}</span>
+                          <span>Rp {Math.round(price.price).toLocaleString('id-ID')}/{price.unit}</span>
+                          {ing._purchaseCount > 1 && <span>rata-rata {ing._purchaseCount} pembelian</span>}
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+    </div>
+  );
 };
 
 export default function KalkulatorHPP() {
@@ -87,6 +216,9 @@ export default function KalkulatorHPP() {
         } else if (ing.unit === 'liter') {
           pricePerBase = ing.unit_price / 1000;
           qtyBase = ing.quantity * 1000;
+        } else if (ing.unit === 'gr' || ing.unit === 'ml') {
+          pricePerBase = ing.quantity > 0 ? ing.unit_price / ing.quantity : 0;
+          qtyBase = ing.quantity;
         } else {
           pricePerBase = ing.unit_price;
           qtyBase = ing.quantity;
@@ -105,7 +237,8 @@ export default function KalkulatorHPP() {
         avgUnitPrice = avgPricePerBase;
       }
 
-      return { ...template, unit_price: avgUnitPrice, _purchaseCount: entries.length };
+      const normalizedQuantity = template.unit === 'gr' || template.unit === 'ml' ? 1 : template.quantity;
+      return { ...template, quantity: normalizedQuantity, unit_price: avgUnitPrice, _purchaseCount: entries.length };
     });
 
     setIngredients(averaged);
@@ -150,9 +283,6 @@ export default function KalkulatorHPP() {
     const masterMap = {};
     (masters || []).forEach(m => { masterMap[m.name.trim().toLowerCase()] = m.id; });
 
-    // 3. Hapus resep lama lalu insert yang baru
-    await supabase.from('recipes').delete().eq('product_id', selectedProductId);
-
     const validItems = recipeItems.filter(i => i.ingredient_id && parseFloat(i.used_qty) > 0);
     const insertData = validItems.map(item => {
       const ing = ingredients.find(i => i.id === item.ingredient_id);
@@ -167,8 +297,33 @@ export default function KalkulatorHPP() {
       };
     }).filter(Boolean);
 
+    if (validItems.length !== insertData.length) {
+      setToast({ message: 'Sebagian bahan belum punya master stok. Resep lama tidak diubah.', type: 'error' });
+      setIsSaving(false);
+      return;
+    }
+
     if (insertData.length > 0) {
-      await supabase.from('recipes').insert(insertData);
+      const { error: upsertError } = await supabase
+        .from('recipes')
+        .upsert(insertData, { onConflict: 'product_id,ingredient_master_id' });
+      if (upsertError) {
+        setToast({ message: 'Gagal menyimpan resep. Resep lama tidak dihapus.', type: 'error' });
+        setIsSaving(false);
+        return;
+      }
+
+      const masterIds = insertData.map(item => item.ingredient_master_id);
+      const { error: deleteStaleError } = await supabase
+        .from('recipes')
+        .delete()
+        .eq('product_id', selectedProductId)
+        .not('ingredient_master_id', 'in', `(${masterIds.join(',')})`);
+      if (deleteStaleError) {
+        setToast({ message: 'Resep tersimpan, tapi bahan lama gagal dibersihkan.', type: 'error' });
+        setIsSaving(false);
+        return;
+      }
     }
 
     setToast({ message: 'HPP & resep berhasil disimpan ke produk!', type: 'success' });
@@ -186,6 +341,14 @@ export default function KalkulatorHPP() {
 
   const handleItemChange = (id, field, value) => {
     setRecipeItems(recipeItems.map(item => item.id === id ? { ...item, [field]: value } : item));
+  };
+
+  const handleIngredientSelect = (id, ingredient) => {
+    setRecipeItems(recipeItems.map(item => {
+      if (item.id !== id) return item;
+      if (!ingredient) return { ...item, ingredient_id: '', used_unit: 'gr' };
+      return { ...item, ingredient_id: ingredient.id, used_unit: getBaseUnit(ingredient) };
+    }));
   };
 
   // Hitung harga per satuan dasar (gr atau ml) dari data pembelian
@@ -209,6 +372,12 @@ export default function KalkulatorHPP() {
     }
 
     // Kasus 3: beli per gr, ml, pcs — langsung pakai unit_price
+    if (ingredient.unit === 'gr' || ingredient.unit === 'ml') {
+      const pricePerBase = ingredient.quantity > 0 ? ingredient.unit_price / ingredient.quantity : 0;
+      if (targetUnit === 'kg' || targetUnit === 'liter') return pricePerBase * 1000;
+      return pricePerBase;
+    }
+
     if (targetUnit === 'kg' || targetUnit === 'liter') return ingredient.unit_price * 1000;
     return ingredient.unit_price;
   };
@@ -284,24 +453,18 @@ export default function KalkulatorHPP() {
               </div>
 
               {recipeItems.map((item, index) => (
-                <div key={item.id} className="flex flex-col sm:flex-row gap-4 items-end p-4 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-100 dark:border-gray-800">
+                <div key={item.id} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_13rem_8rem_auto] gap-4 items-end p-4 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-100 dark:border-gray-800">
                   <div className="flex-1 w-full">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Pilih Bahan</label>
-                    <select
-                      value={item.ingredient_id}
-                      onChange={(e) => handleItemChange(item.id, 'ingredient_id', e.target.value)}
-                      className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:border-primary-500 outline-none"
-                    >
-                      <option value="">-- Pilih Bahan --</option>
-                      {ingredients.map(ing => (
-                        <option key={ing.id} value={ing.id}>
-                          {ing.name} - Rp {Math.round(ing.unit_price).toLocaleString('id-ID')}/{ing.unit}{ing._purchaseCount > 1 ? ` (rata-rata ${ing._purchaseCount} pembelian)` : ''}
-                        </option>
-                      ))}
-                    </select>
+                    <IngredientCombobox
+                      item={item}
+                      ingredients={ingredients}
+                      placement={recipeItems.length > 1 && index >= recipeItems.length - 2 ? 'top' : 'bottom'}
+                      onSelect={(ingredient) => handleIngredientSelect(item.id, ingredient)}
+                    />
                   </div>
                   
-                  <div className="w-full sm:w-52">
+                  <div className="w-full">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Gramasi/Jumlah</label>
                     <div className="flex">
                       <input
@@ -329,7 +492,7 @@ export default function KalkulatorHPP() {
                     </div>
                   </div>
 
-                  <div className="w-full sm:w-32">
+                  <div className="w-full">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Biaya</label>
                     <div className="px-3 py-2 bg-gray-100 dark:bg-gray-900 border border-transparent rounded-lg text-sm font-medium text-gray-900 dark:text-gray-100">
                       Rp {Math.round(calculateRowCost(item)).toLocaleString('id-ID')}

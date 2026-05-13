@@ -43,9 +43,9 @@ const navSections = [
 ];
 
 export default function Sidebar() {
-  const { sidebarOpen, toggleSidebar, setSidebarOpen, user } = useStore();
+  const { sidebarOpen, toggleSidebar, setSidebarOpen, user, profileName } = useStore();
 
-  const username = user?.email ? user.email.split('@')[0] : 'Admin';
+  const username = profileName || (user?.email ? user.email.split('@')[0] : 'Admin');
   const initials = username.slice(0, 2).toUpperCase();
 
   return (

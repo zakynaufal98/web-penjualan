@@ -1,8 +1,116 @@
 import { useState, useEffect } from 'react';
-import { BookOpen, Plus, Trash2, AlertCircle, Loader2, PackageSearch, Package, Edit2, X, ArrowLeftRight } from 'lucide-react';
+import { BookOpen, Plus, Trash2, AlertCircle, Loader2, PackageSearch, Package, Edit2, X, ArrowLeftRight, Search, Check } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import { friendlyError } from '../lib/errorUtils';
+
+const getRecipeUnit = (master) => {
+  if (!master) return 'gr';
+  if (master.items_per_unit && master.base_unit) return master.base_unit;
+  if (master.unit === 'kg') return 'gr';
+  if (master.unit === 'liter') return 'ml';
+  return master.unit || 'gr';
+};
+
+const IngredientMasterPicker = ({ masters, value, onChange, formatQty, placement = 'bottom' }) => {
+  const selected = masters.find(m => m.id === value);
+  const [query, setQuery] = useState(selected?.name || '');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    setQuery(selected?.name || '');
+  }, [selected?.id, selected?.name]);
+
+  const filtered = masters
+    .filter(master => {
+      const q = query.trim().toLowerCase();
+      if (!q) return true;
+      return [master.name, master.category, master.unit, master.base_unit].filter(Boolean).some(v => String(v).toLowerCase().includes(q));
+    })
+    .slice(0, 8);
+
+  return (
+    <div className="relative">
+      <div className={`flex items-center gap-2 bg-white dark:bg-gray-900 border rounded-lg transition-colors ${open ? 'border-primary-500 ring-2 ring-primary-500/10' : 'border-gray-200 dark:border-gray-700'}`}>
+        <Search size={15} className="ml-3 text-gray-400 shrink-0" />
+        <input
+          required
+          value={query}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 120)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          placeholder="Cari bahan stok..."
+          className="w-full min-w-0 bg-transparent py-2 pr-1 text-sm text-gray-900 dark:text-gray-100 outline-none"
+        />
+        {selected && (
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              onChange(null);
+              setQuery('');
+              setOpen(true);
+            }}
+            className="mr-2 p-1 text-gray-400 hover:text-red-500 rounded-md"
+            aria-label="Kosongkan bahan"
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className={`absolute z-50 w-full overflow-hidden rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl shadow-black/10 ${placement === 'top' ? 'bottom-full mb-2' : 'mt-2'}`}>
+          {filtered.length === 0 ? (
+            <div className="p-4 text-sm text-gray-500">Bahan tidak ditemukan.</div>
+          ) : (
+            <div className="max-h-64 overflow-y-auto py-1">
+              {filtered.map(master => {
+                const isSelected = master.id === value;
+                const isLow = master.min_stock > 0 && master.current_stock <= master.min_stock;
+                return (
+                  <button
+                    key={master.id}
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      onChange(master);
+                      setQuery(master.name);
+                      setOpen(false);
+                    }}
+                    className="w-full px-3 py-2.5 text-left hover:bg-primary-50 dark:hover:bg-primary-900/20 transition-colors"
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 p-1.5 rounded-lg bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400">
+                        <Package size={15} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{master.name}</span>
+                          {isSelected && <Check size={14} className="text-primary-600 shrink-0" />}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+                          <span>{master.category || 'Tanpa kategori'}</span>
+                          <span className={master.current_stock <= 0 ? 'text-red-500' : isLow ? 'text-amber-500' : 'text-emerald-600'}>
+                            Stok {formatQty(master.current_stock)} {master.unit}
+                          </span>
+                          {master.items_per_unit && master.base_unit && <span>1 {master.unit} = {formatQty(master.items_per_unit)} {master.base_unit}</span>}
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 export default function Resep() {
   const [activeTab, setActiveTab] = useState('resep');
@@ -36,6 +144,7 @@ export default function Resep() {
   const [editItemsPerUnit, setEditItemsPerUnit] = useState('');
   const [editBaseUnit, setEditBaseUnit] = useState('gr');
   const [editStockLoading, setEditStockLoading] = useState(false);
+  const [stockFilter, setStockFilter] = useState('all');
   const [toast, setToast] = useState({ message: '', type: 'success' });
 
   const fetchProducts = async () => {
@@ -129,7 +238,13 @@ export default function Resep() {
       .from('recipes')
       .select('*, ingredient_masters(id, name, unit, current_stock, items_per_unit, base_unit)')
       .eq('product_id', productId);
-    if (!freshRecipe || freshRecipe.length === 0) return;
+    if (!freshRecipe || freshRecipe.length === 0) {
+      await supabase.from('products').update({
+        cost_price: 0,
+        overhead_pct: overheadPct,
+      }).eq('id', productId);
+      return;
+    }
     const ingredientCost = freshRecipe.reduce((sum, item) => sum + calcItemCostPerPcs(item), 0);
     if (ingredientCost > 0) {
       const totalWithOverhead = ingredientCost * (1 + (overheadPct || 0) / 100);
@@ -263,6 +378,11 @@ export default function Resep() {
   }, [selectedProductId, products]);
 
   const selectedProduct = products.find(p => p.id === selectedProductId);
+  const filteredIngredientMasters = ingredientMasters.filter(master => {
+    if (stockFilter === 'empty') return master.current_stock <= 0;
+    if (stockFilter === 'low') return master.min_stock > 0 && master.current_stock > 0 && master.current_stock <= master.min_stock;
+    return true;
+  });
 
   const formatQty = (qty) => {
     const n = parseFloat(qty);
@@ -336,7 +456,7 @@ export default function Resep() {
           </div>
 
           {selectedProductId ? (
-            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 shadow-sm overflow-hidden">
+            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 shadow-sm">
               <div className="p-5 border-b border-gray-100 dark:border-gray-800 flex items-center gap-3 flex-wrap">
                 <BookOpen size={18} className="text-primary-600 dark:text-primary-400" />
                 <h2 className="font-bold text-gray-900 dark:text-white text-sm">{selectedProduct?.name}</h2>
@@ -501,22 +621,17 @@ export default function Resep() {
                   <form onSubmit={handleAddIngredient} className="flex flex-col sm:flex-row gap-3 items-end">
                     <div className="flex-1">
                       <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Tambah Bahan ke Resep</label>
-                      <select
-                        required
+                      <IngredientMasterPicker
+                        masters={ingredientMasters}
                         value={newItem.ingredient_master_id}
-                        onChange={(e) => {
-                          const master = ingredientMasters.find(m => m.id === e.target.value);
-                          setNewItem({ ...newItem, ingredient_master_id: e.target.value, unit: master?.base_unit || 'gr' });
-                        }}
-                        onInvalid={(e) => e.target.setCustomValidity('Silakan pilih bahan terlebih dahulu')}
-                        onInput={(e) => e.target.setCustomValidity('')}
-                        className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:border-primary-500 outline-none"
-                      >
-                        <option value="">-- Pilih Bahan --</option>
-                        {ingredientMasters.map(m => (
-                          <option key={m.id} value={m.id}>{m.name} — stok {formatQty(m.current_stock)} {m.unit}</option>
-                        ))}
-                      </select>
+                        formatQty={formatQty}
+                        placement="top"
+                        onChange={(master) => setNewItem({
+                          ...newItem,
+                          ingredient_master_id: master?.id || '',
+                          unit: master ? getRecipeUnit(master) : 'gr',
+                        })}
+                      />
                     </div>
                     <div className="w-full sm:w-40">
                       <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Qty per 1 pcs</label>
@@ -565,8 +680,23 @@ export default function Resep() {
       {/* ── TAB: Stok Bahan ── */}
       {activeTab === 'stok' && (
         <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 shadow-sm overflow-hidden">
-          <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50">
+          <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <p className="text-sm text-gray-500 dark:text-gray-400">Klik Edit untuk koreksi stok secara manual jika ada selisih.</p>
+            <div className="flex gap-1 bg-white dark:bg-gray-900 rounded-xl p-1 border border-gray-100 dark:border-gray-700">
+              {[
+                { id: 'all', label: 'Semua' },
+                { id: 'low', label: 'Menipis' },
+                { id: 'empty', label: 'Habis' },
+              ].map(filter => (
+                <button
+                  key={filter.id}
+                  onClick={() => setStockFilter(filter.id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${stockFilter === filter.id ? 'bg-primary-600 text-white' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}
+                >
+                  {filter.label}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="overflow-x-auto">
             {ingredientMasters.length === 0 ? (
@@ -584,7 +714,7 @@ export default function Resep() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-800 text-sm">
-                  {ingredientMasters.map((master) => {
+                  {filteredIngredientMasters.map((master) => {
                     const isLow = master.min_stock > 0 && master.current_stock <= master.min_stock;
                     const isEmpty = master.current_stock <= 0;
                     return (

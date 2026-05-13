@@ -1,20 +1,51 @@
 import { useState } from 'react';
-import { Save, Database, Bell, CreditCard } from 'lucide-react';
+import { Save, Database, Bell, CreditCard, Loader2 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import Toast from '../components/ui/Toast';
+import { supabase } from '../lib/supabase';
 
 export default function Pengaturan() {
-  const { bankInfo, setBankInfo } = useStore();
+  const { bankInfo, setBankInfo, notificationSettings, setNotificationSettings } = useStore();
   const [form, setForm] = useState({
     bank: bankInfo?.bank || '',
     owner: bankInfo?.owner || '',
     number: bankInfo?.number || '',
   });
+  const [notifications, setNotifications] = useState(notificationSettings);
+  const [backupLoading, setBackupLoading] = useState(false);
   const [toast, setToast] = useState({ message: '', type: 'success' });
 
   const handleSave = () => {
     setBankInfo(form);
+    setNotificationSettings({
+      ...notifications,
+      productLowStockThreshold: Math.max(0, parseInt(notifications.productLowStockThreshold) || 0),
+      largeExpenseThreshold: Math.max(0, parseInt(notifications.largeExpenseThreshold) || 0),
+    });
     setToast({ message: 'Pengaturan berhasil disimpan!', type: 'success' });
+  };
+
+  const handleBackup = async () => {
+    setBackupLoading(true);
+    const tables = ['products', 'sales', 'ingredients', 'ingredient_masters', 'recipes', 'production_logs'];
+    const backup = {};
+
+    for (const table of tables) {
+      const { data, error } = await supabase.from(table).select('*');
+      backup[table] = error ? { error: error.message } : data || [];
+    }
+
+    const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), data: backup }, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `backup-kukis-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setBackupLoading(false);
+    setToast({ message: 'Backup JSON berhasil dibuat.', type: 'success' });
   };
 
   return (
@@ -80,7 +111,12 @@ export default function Pengaturan() {
           <h2 className="text-base font-bold text-gray-900 dark:text-white">Database & Backup</h2>
         </div>
         <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">Data Anda disimpan secara aman di Supabase.</p>
-        <button className="bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors">
+        <button
+          onClick={handleBackup}
+          disabled={backupLoading}
+          className="inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-60 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors"
+        >
+          {backupLoading && <Loader2 size={15} className="animate-spin" />}
           Backup Sekarang
         </button>
       </div>
@@ -94,14 +130,66 @@ export default function Pengaturan() {
           <h2 className="text-base font-bold text-gray-900 dark:text-white">Notifikasi</h2>
         </div>
         <div className="space-y-4">
-          <label className="flex items-center justify-between">
-            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Peringatan Stok Menipis</span>
-            <input type="checkbox" className="toggle-checkbox" defaultChecked />
+          <label className="flex items-center justify-between gap-4 rounded-xl bg-gray-50 dark:bg-gray-800 p-3">
+            <span>
+              <span className="block text-sm font-medium text-gray-700 dark:text-gray-300">Peringatan Stok Produk</span>
+              <span className="block text-xs text-gray-500 dark:text-gray-400">Muncul saat stok produk sama dengan atau di bawah batas.</span>
+            </span>
+            <input
+              type="checkbox"
+              className="toggle-checkbox"
+              checked={notifications.lowStock}
+              onChange={(e) => setNotifications({ ...notifications, lowStock: e.target.checked })}
+            />
           </label>
-          <label className="flex items-center justify-between">
-            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Notifikasi Pengeluaran Besar {'>'} Rp 1.000.000</span>
-            <input type="checkbox" className="toggle-checkbox" defaultChecked />
+          {notifications.lowStock && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Batas Stok Produk (pcs)</label>
+              <input
+                type="number"
+                min="0"
+                value={notifications.productLowStockThreshold ?? 5}
+                onChange={(e) => setNotifications({ ...notifications, productLowStockThreshold: e.target.value === '' ? '' : parseInt(e.target.value) })}
+                className="w-full sm:w-48 px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+              />
+            </div>
+          )}
+          <label className="flex items-center justify-between gap-4 rounded-xl bg-gray-50 dark:bg-gray-800 p-3">
+            <span>
+              <span className="block text-sm font-medium text-gray-700 dark:text-gray-300">Peringatan Stok Bahan</span>
+              <span className="block text-xs text-gray-500 dark:text-gray-400">Mengikuti stok minimum yang diatur di halaman Resep & Stok Bahan.</span>
+            </span>
+            <input
+              type="checkbox"
+              className="toggle-checkbox"
+              checked={notifications.ingredientLowStock ?? true}
+              onChange={(e) => setNotifications({ ...notifications, ingredientLowStock: e.target.checked })}
+            />
           </label>
+          <label className="flex items-center justify-between gap-4 rounded-xl bg-gray-50 dark:bg-gray-800 p-3">
+            <span>
+              <span className="block text-sm font-medium text-gray-700 dark:text-gray-300">Notifikasi Pengeluaran Besar</span>
+              <span className="block text-xs text-gray-500 dark:text-gray-400">Pantau pembelian bahan bernilai besar dalam 7 hari terakhir.</span>
+            </span>
+            <input
+              type="checkbox"
+              className="toggle-checkbox"
+              checked={notifications.largeExpense}
+              onChange={(e) => setNotifications({ ...notifications, largeExpense: e.target.checked })}
+            />
+          </label>
+          {notifications.largeExpense && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Batas Pengeluaran Besar (Rp)</label>
+              <input
+                type="number"
+                min="0"
+                value={notifications.largeExpenseThreshold ?? 1000000}
+                onChange={(e) => setNotifications({ ...notifications, largeExpenseThreshold: e.target.value === '' ? '' : parseInt(e.target.value) })}
+                className="w-full sm:w-64 px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+              />
+            </div>
+          )}
         </div>
       </div>
 

@@ -1,10 +1,110 @@
 import { useState, useEffect } from 'react';
-import { Search, Plus, Filter, MoreVertical, Edit2, Trash2, X, Loader2, AlertCircle } from 'lucide-react';
+import { Search, Plus, Edit2, Trash2, X, Loader2, AlertCircle, Package, Check } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { useStore } from '../store/useStore';
 import Toast from '../components/ui/Toast';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
 import { friendlyError } from '../lib/errorUtils';
+import { dateInputToLocalISOString, todayInputValue } from '../lib/dateUtils';
+import { reconcileProductStock } from '../lib/productStock';
+
+const ProductPicker = ({ products, value, onChange }) => {
+  const selected = products.find(p => p.id === value);
+  const [query, setQuery] = useState(selected?.name || '');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    setQuery(selected?.name || '');
+  }, [selected?.id, selected?.name]);
+
+  const filtered = products
+    .filter(p => {
+      const q = query.trim().toLowerCase();
+      if (!q) return true;
+      return [p.name, p.category].filter(Boolean).some(v => String(v).toLowerCase().includes(q));
+    })
+    .slice(0, 8);
+
+  return (
+    <div className="relative">
+      <div className={`flex items-center gap-2 bg-gray-50 dark:bg-gray-800 border rounded-xl transition-colors ${open ? 'border-primary-500 ring-2 ring-primary-500/10' : 'border-gray-200 dark:border-gray-700'}`}>
+        <Search size={16} className="ml-3 text-gray-400 shrink-0" />
+        <input
+          required
+          value={query}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 120)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          placeholder="Cari produk kue..."
+          className="w-full min-w-0 bg-transparent py-2.5 pr-1 text-sm outline-none text-gray-900 dark:text-gray-100"
+        />
+        {selected && (
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              onChange('');
+              setQuery('');
+              setOpen(true);
+            }}
+            className="mr-2 p-1 text-gray-400 hover:text-red-500 rounded-md"
+            aria-label="Kosongkan produk"
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className="absolute z-50 mt-2 w-full overflow-hidden rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl shadow-black/10">
+          {filtered.length === 0 ? (
+            <div className="p-4 text-sm text-gray-500">Produk tidak ditemukan.</div>
+          ) : (
+            <div className="max-h-72 overflow-y-auto py-1">
+              {filtered.map(product => {
+                const outOfStock = product.stock <= 0;
+                const isSelected = product.id === value;
+                return (
+                  <button
+                    key={product.id}
+                    type="button"
+                    disabled={outOfStock && !isSelected}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      onChange(product.id);
+                      setQuery(product.name);
+                      setOpen(false);
+                    }}
+                    className="w-full px-3 py-2.5 text-left hover:bg-primary-50 dark:hover:bg-primary-900/20 disabled:opacity-45 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 p-1.5 rounded-lg bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400">
+                        <Package size={15} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{product.name}</span>
+                          {isSelected && <Check size={14} className="text-primary-600 shrink-0" />}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+                          <span>Rp {product.selling_price.toLocaleString('id-ID')}</span>
+                          <span className={outOfStock ? 'text-red-500' : product.stock <= 5 ? 'text-amber-500' : 'text-emerald-600'}>Stok {product.stock} pcs</span>
+                          {product.category && <span>{product.category}</span>}
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 export default function Penjualan() {
   const [searchTerm, setSearchTerm] = useState('');
@@ -19,16 +119,23 @@ export default function Penjualan() {
     quantity: 1,
     payment_method: 'Cash',
     customer_name: '',
-    transaction_date: new Date().toISOString().split('T')[0]
+    transaction_date: todayInputValue()
   });
   const [editingTransaction, setEditingTransaction] = useState(null);
   const [formLoading, setFormLoading] = useState(false);
+  const [quickSale, setQuickSale] = useState({ product_id: '', quantity: 1, payment_method: 'Cash' });
+  const [quickSaleLoading, setQuickSaleLoading] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState({ message: '', type: 'success' });
   const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null });
   const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
   const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
-  const { user } = useStore();
+  const selectedProduct = products.find(p => p.id === formData.product_id);
+  const previewQty = parseInt(formData.quantity) || 0;
+  const previewTotal = selectedProduct ? selectedProduct.selling_price * previewQty : 0;
+  const selectedQuickProduct = products.find(p => p.id === quickSale.product_id);
+  const quickSaleQty = parseInt(quickSale.quantity) || 0;
+  const quickSaleTotal = selectedQuickProduct ? selectedQuickProduct.selling_price * quickSaleQty : 0;
 
   useEffect(() => {
     fetchTransactions();
@@ -55,9 +162,23 @@ export default function Penjualan() {
     setProducts(data || []);
   };
 
+  const updateProductStock = async (productId, delta) => {
+    if (!delta) return { error: null };
+    const { data: product, error: fetchError } = await supabase
+      .from('products')
+      .select('stock')
+      .eq('id', productId)
+      .single();
+    if (fetchError || !product) return { error: fetchError || new Error('Produk tidak ditemukan') };
+    return supabase
+      .from('products')
+      .update({ stock: Math.max(0, (product.stock || 0) + delta) })
+      .eq('id', productId);
+  };
+
   const openAdd = () => {
     setEditingTransaction(null);
-    setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: new Date().toISOString().split('T')[0] });
+    setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue() });
     setError('');
     setIsModalOpen(true);
   };
@@ -69,7 +190,7 @@ export default function Penjualan() {
       quantity: trx.quantity,
       payment_method: trx.payment_method,
       customer_name: trx.customer_name || '',
-      transaction_date: trx.transaction_date ? trx.transaction_date.split('T')[0] : new Date().toISOString().split('T')[0]
+      transaction_date: trx.transaction_date ? trx.transaction_date.split('T')[0] : todayInputValue()
     });
     setError('');
     setIsModalOpen(true);
@@ -112,37 +233,107 @@ export default function Penjualan() {
       unit_price: freshProduct.selling_price,
       payment_method: formData.payment_method,
       customer_name: formData.customer_name || null,
-      transaction_date: new Date(formData.transaction_date).toISOString(),
+      transaction_date: dateInputToLocalISOString(formData.transaction_date),
     };
 
-    const { error: dbError } = editingTransaction
-      ? await supabase.from('sales').update(payload).eq('id', editingTransaction.id)
-      : await supabase.from('sales').insert([payload]);
+    let dbError;
+
+    if (editingTransaction) {
+      const stockChanges = isSameProduct
+        ? [{ productId: formData.product_id, delta: -stockNeeded }]
+        : [
+            { productId: editingTransaction.product_id, delta: editingTransaction.quantity },
+            { productId: formData.product_id, delta: -newQty },
+          ];
+
+      for (const change of stockChanges) {
+        const { error: stockError } = await updateProductStock(change.productId, change.delta);
+        if (stockError) {
+          setError('Gagal menyesuaikan stok produk. Transaksi belum diubah.');
+          setFormLoading(false);
+          return;
+        }
+      }
+
+      const { error: updateError } = await supabase
+        .from('sales')
+        .update(payload)
+        .eq('id', editingTransaction.id);
+      dbError = updateError;
+
+      if (dbError) {
+        for (const change of stockChanges.slice().reverse()) {
+          await updateProductStock(change.productId, -change.delta);
+        }
+      }
+    } else {
+      const { error: insertError } = await supabase.from('sales').insert([payload]);
+      dbError = insertError;
+    }
 
     if (dbError) {
       setError(friendlyError(dbError));
     } else {
       if (editingTransaction) {
-        // EDIT: trigger tr_reduce_stock tidak aktif pada UPDATE, harus manual
-        if (!isSameProduct) {
-          // Produk diganti: kembalikan stok produk lama, kurangi stok produk baru
-          const { data: oldProd } = await supabase.from('products').select('stock').eq('id', editingTransaction.product_id).single();
-          if (oldProd) {
-            await supabase.from('products').update({ stock: oldProd.stock + editingTransaction.quantity }).eq('id', editingTransaction.product_id);
-          }
-          await supabase.from('products').update({ stock: freshProduct.stock - newQty }).eq('id', formData.product_id);
-        } else if (stockNeeded !== 0) {
-          // Produk sama, qty berubah: sesuaikan selisih saja
-          await supabase.from('products').update({ stock: freshProduct.stock - stockNeeded }).eq('id', formData.product_id);
-        }
+        await reconcileProductStock(editingTransaction.product_id);
       }
+      await reconcileProductStock(formData.product_id);
       // INSERT: trigger tr_reduce_stock otomatis mengurangi stok — tidak perlu manual
       setIsModalOpen(false);
-      setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: new Date().toISOString().split('T')[0] });
+      setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue() });
       setToast({ message: editingTransaction ? 'Transaksi berhasil diperbarui!' : 'Penjualan berhasil dicatat!', type: 'success' });
       fetchTransactions();
+      fetchProducts();
     }
     setFormLoading(false);
+  };
+
+  const handleQuickSale = async (e) => {
+    e.preventDefault();
+    setError('');
+    if (!quickSale.product_id || quickSaleQty <= 0) {
+      setToast({ message: 'Pilih produk dan isi jumlah penjualan.', type: 'error' });
+      return;
+    }
+
+    setQuickSaleLoading(true);
+    const { data: freshProduct } = await supabase
+      .from('products')
+      .select('*')
+      .eq('id', quickSale.product_id)
+      .single();
+
+    if (!freshProduct) {
+      setToast({ message: 'Produk tidak ditemukan.', type: 'error' });
+      setQuickSaleLoading(false);
+      return;
+    }
+
+    if ((freshProduct.stock || 0) < quickSaleQty) {
+      setToast({ message: `Stok ${freshProduct.name} tidak cukup. Tersedia ${freshProduct.stock || 0} pcs.`, type: 'error' });
+      setQuickSaleLoading(false);
+      return;
+    }
+
+    const { error: insertError } = await supabase.from('sales').insert([{
+      product_id: quickSale.product_id,
+      quantity: quickSaleQty,
+      unit_price: freshProduct.selling_price,
+      payment_method: quickSale.payment_method,
+      customer_name: null,
+      transaction_date: dateInputToLocalISOString(todayInputValue()),
+    }]);
+
+    if (insertError) {
+      setToast({ message: friendlyError(insertError), type: 'error' });
+    } else {
+      await reconcileProductStock(quickSale.product_id);
+      setQuickSale({ product_id: '', quantity: 1, payment_method: quickSale.payment_method });
+      setToast({ message: 'Penjualan cepat berhasil dicatat.', type: 'success' });
+      fetchTransactions();
+      fetchProducts();
+    }
+    setQuickSaleLoading(false);
   };
 
   const handleDelete = (id) => {
@@ -156,13 +347,14 @@ export default function Penjualan() {
       setToast({ message: 'Gagal menghapus transaksi.', type: 'error' });
     } else {
       if (trxToDelete) {
-        const { data: prodData } = await supabase.from('products').select('stock').eq('id', trxToDelete.product_id).single();
-        if (prodData) {
-          await supabase.from('products').update({ stock: prodData.stock + trxToDelete.quantity }).eq('id', trxToDelete.product_id);
+        const { reconciled } = await reconcileProductStock(trxToDelete.product_id);
+        if (!reconciled) {
+          await updateProductStock(trxToDelete.product_id, trxToDelete.quantity);
         }
       }
       setToast({ message: 'Transaksi berhasil dihapus.', type: 'success' });
       fetchTransactions();
+      fetchProducts();
     }
   };
 
@@ -181,6 +373,64 @@ export default function Penjualan() {
           <span>Tambah Penjualan</span>
         </button>
       </div>
+
+      <form onSubmit={handleQuickSale} className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 p-4">
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_7rem_9rem_auto] gap-3 items-end">
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Kasir Cepat</label>
+            <ProductPicker
+              products={products}
+              value={quickSale.product_id}
+              onChange={(productId) => setQuickSale({ ...quickSale, product_id: productId })}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Qty</label>
+            <input
+              type="number"
+              min="1"
+              required
+              value={quickSale.quantity}
+              onChange={(e) => setQuickSale({ ...quickSale, quantity: e.target.value === '' ? '' : parseInt(e.target.value) })}
+              className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Bayar</label>
+            <select
+              value={quickSale.payment_method}
+              onChange={(e) => setQuickSale({ ...quickSale, payment_method: e.target.value })}
+              className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+            >
+              <option value="Cash">Cash</option>
+              <option value="Transfer">Transfer</option>
+              <option value="QRIS">QRIS</option>
+              <option value="Debit">Debit</option>
+            </select>
+          </div>
+          <button
+            type="submit"
+            disabled={quickSaleLoading}
+            className="w-full lg:w-auto flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors disabled:opacity-70"
+          >
+            {quickSaleLoading ? <Loader2 className="animate-spin" size={16} /> : <Plus size={16} />}
+            Simpan Cepat
+          </button>
+        </div>
+        {selectedQuickProduct && (
+          <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+            <div className="rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-500">
+              Stok: <span className={`font-semibold ${selectedQuickProduct.stock <= 0 ? 'text-red-500' : selectedQuickProduct.stock <= 5 ? 'text-amber-500' : 'text-emerald-600'}`}>{selectedQuickProduct.stock} pcs</span>
+            </div>
+            <div className="rounded-lg bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2 text-emerald-700 dark:text-emerald-300">
+              Total: <span className="font-semibold">Rp {quickSaleTotal.toLocaleString('id-ID')}</span>
+            </div>
+            <div className="hidden sm:block rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-500">
+              Sisa setelah jual: <span className="font-semibold">{Math.max(0, selectedQuickProduct.stock - quickSaleQty)} pcs</span>
+            </div>
+          </div>
+        )}
+      </form>
 
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
         <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50">
@@ -275,7 +525,7 @@ export default function Penjualan() {
                 <input
                   type="date" required
                   value={formData.transaction_date}
-                  max={new Date().toISOString().split('T')[0]}
+                  max={todayInputValue()}
                   onChange={(e) => setFormData({...formData, transaction_date: e.target.value})}
                   className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
                 />
@@ -283,17 +533,17 @@ export default function Penjualan() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Pilih Produk</label>
-                <select
-                  required
-                  value={formData.product_id}
-                  onChange={(e) => setFormData({...formData, product_id: e.target.value})}
-                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
-                >
-                  <option value="">-- Pilih Produk Kue --</option>
-                  {products.map(p => (
-                    <option key={p.id} value={p.id}>{p.name} - Rp {p.selling_price.toLocaleString('id-ID')}</option>
-                  ))}
-                </select>
+                <ProductPicker products={products} value={formData.product_id} onChange={(productId) => setFormData({...formData, product_id: productId})} />
+                {selectedProduct && (
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                    <div className="rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-500">
+                      Stok: <span className={`font-semibold ${selectedProduct.stock <= 0 ? 'text-red-500' : selectedProduct.stock <= 5 ? 'text-amber-500' : 'text-emerald-600'}`}>{selectedProduct.stock} pcs</span>
+                    </div>
+                    <div className="rounded-lg bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2 text-emerald-700 dark:text-emerald-300">
+                      Total: <span className="font-semibold">Rp {previewTotal.toLocaleString('id-ID')}</span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-4">
