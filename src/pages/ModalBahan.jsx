@@ -12,6 +12,7 @@ import { dateInputToLocalISOString, todayInputValue } from '../lib/dateUtils';
 export default function ModalBahan() {
   const [activeTab, setActiveTab] = useState('riwayat');
   const [searchTerm, setSearchTerm] = useState('');
+  const [historyFilters, setHistoryFilters] = useState({ period: 'all', category: '', supplier: '' });
   const [ingredients, setIngredients] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -75,6 +76,33 @@ export default function ModalBahan() {
         .some(value => String(value).toLowerCase().includes(q)))
       .slice(0, 8);
   }, [currentItem.name, ingredients]);
+  const categories = useMemo(() => [...new Set(ingredients.map(item => item.category).filter(Boolean))].sort(), [ingredients]);
+  const suppliers = useMemo(() => [...new Set(ingredients.map(item => item.supplier || 'Tanpa Supplier'))].sort(), [ingredients]);
+  const filteredIngredients = useMemo(() => ingredients.filter(item => {
+    const q = searchTerm.trim().toLowerCase();
+    const matchesSearch = !q
+      || item.name?.toLowerCase().includes(q)
+      || item.category?.toLowerCase().includes(q)
+      || item.supplier?.toLowerCase().includes(q);
+    const date = new Date(item.purchase_date);
+    const now = new Date();
+    const start = new Date(now);
+    let matchesPeriod = true;
+    if (historyFilters.period === 'today') matchesPeriod = date.toDateString() === now.toDateString();
+    if (historyFilters.period === 'week') {
+      start.setDate(now.getDate() - 6);
+      start.setHours(0, 0, 0, 0);
+      matchesPeriod = date >= start;
+    }
+    if (historyFilters.period === 'month') {
+      start.setDate(1);
+      start.setHours(0, 0, 0, 0);
+      matchesPeriod = date >= start;
+    }
+    const matchesCategory = !historyFilters.category || item.category === historyFilters.category;
+    const matchesSupplier = !historyFilters.supplier || (item.supplier || 'Tanpa Supplier') === historyFilters.supplier;
+    return matchesSearch && matchesPeriod && matchesCategory && matchesSupplier;
+  }), [ingredients, searchTerm, historyFilters]);
 
   useEffect(() => {
     fetchIngredients();
@@ -474,8 +502,9 @@ export default function ModalBahan() {
       {/* ── TAB: Riwayat Pembelian ── */}
       {activeTab === 'riwayat' && (
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
-        <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50">
-          <div className="relative w-full sm:w-72">
+        <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 space-y-3">
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_9rem_12rem_12rem_auto] gap-2">
+            <div className="relative">
             <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
@@ -484,6 +513,24 @@ export default function ModalBahan() {
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-10 pr-4 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 rounded-xl text-sm outline-none transition-all"
             />
+            </div>
+            <select value={historyFilters.period} onChange={(e) => setHistoryFilters({ ...historyFilters, period: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="all">Semua waktu</option>
+              <option value="today">Hari ini</option>
+              <option value="week">7 hari</option>
+              <option value="month">Bulan ini</option>
+            </select>
+            <select value={historyFilters.category} onChange={(e) => setHistoryFilters({ ...historyFilters, category: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="">Semua kategori</option>
+              {categories.map(category => <option key={category} value={category}>{category}</option>)}
+            </select>
+            <select value={historyFilters.supplier} onChange={(e) => setHistoryFilters({ ...historyFilters, supplier: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="">Semua supplier</option>
+              {suppliers.map(supplier => <option key={supplier} value={supplier}>{supplier}</option>)}
+            </select>
+            <button type="button" onClick={() => { setSearchTerm(''); setHistoryFilters({ period: 'all', category: '', supplier: '' }); }} className="px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-primary-600 hover:bg-white dark:hover:bg-gray-900 transition-colors">
+              Reset
+            </button>
           </div>
         </div>
 
@@ -519,8 +566,12 @@ export default function ModalBahan() {
                     </div>
                   </td>
                 </tr>
+              ) : filteredIngredients.length === 0 ? (
+                <tr>
+                  <td colSpan="8" className="p-8 text-center text-gray-500">Tidak ada pembelian yang cocok dengan filter.</td>
+                </tr>
               ) : (
-                ingredients.filter(i => i.name.toLowerCase().includes(searchTerm.toLowerCase())).map((item) => (
+                filteredIngredients.map((item) => (
                   <tr key={item.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">{new Date(item.purchase_date).toLocaleDateString('id-ID')}</td>
                     <td className="p-4 font-medium text-gray-900 dark:text-gray-100 whitespace-nowrap">{item.name}</td>

@@ -1,10 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { Search, Plus, Edit2, Trash2, X, Loader2, AlertCircle, Package, Check, ShoppingCart } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
 import { friendlyError } from '../lib/errorUtils';
-import { dateInputToLocalISOString, todayInputValue } from '../lib/dateUtils';
+import {
+  currentTimeInputValue,
+  dateTimeInputToLocalISOString,
+  dateToInputValue,
+  timeInputValue,
+  todayInputValue,
+} from '../lib/dateUtils';
 import { reconcileProductStock } from '../lib/productStock';
 
 const ProductPicker = ({ products, value, onChange }) => {
@@ -106,8 +112,79 @@ const ProductPicker = ({ products, value, onChange }) => {
   );
 };
 
+const CustomerNameInput = ({ value, onChange, suggestions }) => {
+  const [open, setOpen] = useState(false);
+  const filtered = suggestions
+    .filter(name => {
+      const q = value.trim().toLowerCase();
+      if (!q) return true;
+      return name.toLowerCase().includes(q);
+    })
+    .slice(0, 6);
+
+  return (
+    <div className="relative">
+      <input
+        type="text"
+        placeholder="Cth: Budi"
+        value={value}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 120)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+      />
+      {open && filtered.length > 0 && (
+        <div className="absolute z-50 mt-2 w-full overflow-hidden rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl shadow-black/10">
+          {filtered.map(name => (
+            <button
+              key={name}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onChange(name);
+                setOpen(false);
+              }}
+              className="w-full px-4 py-2.5 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-primary-50 dark:hover:bg-primary-900/20"
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const isInPeriod = (dateValue, period) => {
+  if (period === 'all') return true;
+  const date = new Date(dateValue);
+  const now = new Date();
+  const start = new Date(now);
+
+  if (period === 'today') {
+    return date.toDateString() === now.toDateString();
+  }
+  if (period === 'week') {
+    start.setDate(now.getDate() - 6);
+    start.setHours(0, 0, 0, 0);
+    return date >= start;
+  }
+  if (period === 'month') {
+    start.setDate(1);
+    start.setHours(0, 0, 0, 0);
+    return date >= start;
+  }
+  return true;
+};
+
 export default function Penjualan() {
   const [searchTerm, setSearchTerm] = useState('');
+  const [filters, setFilters] = useState({ period: 'all', productId: '', payment: '', customer: '' });
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -119,7 +196,8 @@ export default function Penjualan() {
     quantity: 1,
     payment_method: 'Cash',
     customer_name: '',
-    transaction_date: todayInputValue()
+    transaction_date: todayInputValue(),
+    transaction_time: currentTimeInputValue()
   });
   const [editingTransaction, setEditingTransaction] = useState(null);
   const [formLoading, setFormLoading] = useState(false);
@@ -136,6 +214,29 @@ export default function Penjualan() {
   const selectedQuickProduct = products.find(p => p.id === quickSale.product_id);
   const quickSaleQty = parseInt(quickSale.quantity) || 0;
   const quickSaleTotal = selectedQuickProduct ? selectedQuickProduct.selling_price * quickSaleQty : 0;
+  const customerSuggestions = useMemo(() => (
+    [...new Set(transactions.map(t => t.customer_name).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+  ), [transactions]);
+  const filteredTransactions = useMemo(() => transactions.filter(t => {
+    const q = searchTerm.trim().toLowerCase();
+    const matchesSearch = !q
+      || t.products?.name?.toLowerCase().includes(q)
+      || t.customer_name?.toLowerCase().includes(q)
+      || t.payment_method?.toLowerCase().includes(q);
+    const matchesPeriod = isInPeriod(t.transaction_date, filters.period);
+    const matchesProduct = !filters.productId || t.product_id === filters.productId;
+    const matchesPayment = !filters.payment || t.payment_method === filters.payment;
+    const matchesCustomer = !filters.customer || t.customer_name === filters.customer;
+    return matchesSearch && matchesPeriod && matchesProduct && matchesPayment && matchesCustomer;
+  }), [transactions, searchTerm, filters]);
+  const totalPages = Math.max(1, Math.ceil(filteredTransactions.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const paginatedTransactions = filteredTransactions.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchTerm, filters, pageSize]);
 
   useEffect(() => {
     fetchTransactions();
@@ -178,19 +279,21 @@ export default function Penjualan() {
 
   const openAdd = () => {
     setEditingTransaction(null);
-    setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue() });
+    setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue(), transaction_time: currentTimeInputValue() });
     setError('');
     setIsModalOpen(true);
   };
 
   const openEdit = (trx) => {
+    const transactionDate = trx.transaction_date ? new Date(trx.transaction_date) : new Date();
     setEditingTransaction(trx);
     setFormData({
       product_id: trx.product_id,
       quantity: trx.quantity,
       payment_method: trx.payment_method,
       customer_name: trx.customer_name || '',
-      transaction_date: trx.transaction_date ? trx.transaction_date.split('T')[0] : todayInputValue()
+      transaction_date: dateToInputValue(transactionDate),
+      transaction_time: timeInputValue(transactionDate)
     });
     setError('');
     setIsModalOpen(true);
@@ -233,7 +336,7 @@ export default function Penjualan() {
       unit_price: freshProduct.selling_price,
       payment_method: formData.payment_method,
       customer_name: formData.customer_name || null,
-      transaction_date: dateInputToLocalISOString(formData.transaction_date),
+      transaction_date: dateTimeInputToLocalISOString(formData.transaction_date, formData.transaction_time),
     };
 
     let dbError;
@@ -280,7 +383,7 @@ export default function Penjualan() {
       await reconcileProductStock(formData.product_id);
       // INSERT: trigger tr_reduce_stock otomatis mengurangi stok — tidak perlu manual
       setIsModalOpen(false);
-      setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue() });
+      setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue(), transaction_time: currentTimeInputValue() });
       setToast({ message: editingTransaction ? 'Transaksi berhasil diperbarui!' : 'Penjualan berhasil dicatat!', type: 'success' });
       fetchTransactions();
       fetchProducts();
@@ -321,7 +424,7 @@ export default function Penjualan() {
       unit_price: freshProduct.selling_price,
       payment_method: quickSale.payment_method,
       customer_name: null,
-      transaction_date: dateInputToLocalISOString(todayInputValue()),
+      transaction_date: dateTimeInputToLocalISOString(todayInputValue(), currentTimeInputValue()),
     }]);
 
     if (insertError) {
@@ -433,8 +536,9 @@ export default function Penjualan() {
       </form>
 
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
-        <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50">
-          <div className="relative w-full sm:w-72">
+        <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 space-y-3">
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_9rem_12rem_10rem_12rem_auto] gap-2">
+            <div className="relative">
             <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input 
               type="text" 
@@ -443,6 +547,28 @@ export default function Penjualan() {
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-10 pr-4 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 rounded-xl text-sm outline-none transition-all"
             />
+            </div>
+            <select value={filters.period} onChange={(e) => setFilters({ ...filters, period: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="all">Semua waktu</option>
+              <option value="today">Hari ini</option>
+              <option value="week">7 hari</option>
+              <option value="month">Bulan ini</option>
+            </select>
+            <select value={filters.productId} onChange={(e) => setFilters({ ...filters, productId: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="">Semua produk</option>
+              {products.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}
+            </select>
+            <select value={filters.payment} onChange={(e) => setFilters({ ...filters, payment: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="">Semua bayar</option>
+              {['Cash', 'Transfer', 'QRIS', 'Debit'].map(method => <option key={method} value={method}>{method}</option>)}
+            </select>
+            <select value={filters.customer} onChange={(e) => setFilters({ ...filters, customer: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="">Semua pelanggan</option>
+              {customerSuggestions.map(name => <option key={name} value={name}>{name}</option>)}
+            </select>
+            <button type="button" onClick={() => { setSearchTerm(''); setFilters({ period: 'all', productId: '', payment: '', customer: '' }); setPage(1); }} className="px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-primary-600 hover:bg-white dark:hover:bg-gray-900 transition-colors">
+              Reset
+            </button>
           </div>
         </div>
 
@@ -477,10 +603,23 @@ export default function Penjualan() {
                     </div>
                   </td>
                 </tr>
+              ) : filteredTransactions.length === 0 ? (
+                <tr>
+                  <td colSpan="7" className="p-8 text-center text-gray-500">Tidak ada transaksi yang cocok dengan filter.</td>
+                </tr>
               ) : (
-                transactions.filter(t => t.products?.name?.toLowerCase().includes(searchTerm.toLowerCase())).map((trx) => (
+                paginatedTransactions.map((trx) => (
                   <tr key={trx.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
-                    <td className="p-4 text-gray-500 dark:text-gray-400">{new Date(trx.transaction_date).toLocaleDateString('id-ID', { hour: '2-digit', minute:'2-digit'})}</td>
+                    <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                      {new Date(trx.transaction_date).toLocaleString('id-ID', {
+                        weekday: 'long',
+                        day: 'numeric',
+                        month: 'short',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </td>
                     <td className="p-4 text-gray-900 dark:text-gray-100 font-medium whitespace-nowrap">{trx.products?.name || 'Produk Dihapus'}</td>
                     <td className="p-4 text-right text-gray-900 dark:text-gray-100">{trx.quantity}</td>
                     <td className="p-4 text-right font-medium text-emerald-600 dark:text-emerald-400 whitespace-nowrap">Rp {trx.total_price?.toLocaleString('id-ID')}</td>
@@ -506,6 +645,41 @@ export default function Penjualan() {
             </tbody>
           </table>
         </div>
+        {filteredTransactions.length > 0 && (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 border-t border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/40">
+            <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              <span>
+                Menampilkan {(currentPage - 1) * pageSize + 1}-{Math.min(currentPage * pageSize, filteredTransactions.length)} dari {filteredTransactions.length} transaksi
+              </span>
+              <select
+                value={pageSize}
+                onChange={(e) => setPageSize(parseInt(e.target.value))}
+                className="px-2 py-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-xs outline-none"
+              >
+                {[10, 25, 50].map(size => <option key={size} value={size}>{size}/hal</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={currentPage <= 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-white dark:hover:bg-gray-900 transition-colors"
+              >
+                Sebelumnya
+              </button>
+              <span className="text-xs text-gray-500 dark:text-gray-400">Hal {currentPage}/{totalPages}</span>
+              <button
+                type="button"
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage >= totalPages}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-white dark:hover:bg-gray-900 transition-colors"
+              >
+                Berikutnya
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />
@@ -529,15 +703,26 @@ export default function Penjualan() {
                 </div>
               )}
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Tanggal Transaksi</label>
-                <input
-                  type="date" required
-                  value={formData.transaction_date}
-                  max={todayInputValue()}
-                  onChange={(e) => setFormData({...formData, transaction_date: e.target.value})}
-                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Tanggal Transaksi</label>
+                  <input
+                    type="date" required
+                    value={formData.transaction_date}
+                    max={todayInputValue()}
+                    onChange={(e) => setFormData({...formData, transaction_date: e.target.value})}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jam</label>
+                  <input
+                    type="time" required
+                    value={formData.transaction_time}
+                    onChange={(e) => setFormData({...formData, transaction_time: e.target.value})}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                  />
+                </div>
               </div>
 
               <div>
@@ -582,11 +767,10 @@ export default function Penjualan() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Nama Pelanggan (Opsional)</label>
-                <input 
-                  type="text" placeholder="Cth: Budi"
+                <CustomerNameInput
                   value={formData.customer_name}
-                  onChange={(e) => setFormData({...formData, customer_name: e.target.value})}
-                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                  suggestions={customerSuggestions}
+                  onChange={(customerName) => setFormData({ ...formData, customer_name: customerName })}
                 />
               </div>
 

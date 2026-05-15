@@ -10,6 +10,9 @@ import { friendlyError } from '../lib/errorUtils';
 export default function Produk() {
   const [searchTerm, setSearchTerm] = useState('');
   const [stockFilter, setStockFilter] = useState('all');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [readinessFilter, setReadinessFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all');
   const [products, setProducts] = useState([]);
   const [recipeProductIds, setRecipeProductIds] = useState(new Set());
   const [productionProductIds, setProductionProductIds] = useState(new Set());
@@ -157,6 +160,7 @@ export default function Produk() {
     return { label: 'HPP belum dihitung', className: 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300' };
   };
 
+  const productCategories = [...new Set(products.map(p => p.category).filter(Boolean))].sort();
   const filteredProducts = products
     .filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()) || (p.category || '').toLowerCase().includes(searchTerm.toLowerCase()))
     .filter(p => {
@@ -164,6 +168,21 @@ export default function Produk() {
       if (stockFilter === 'low') return (p.stock || 0) > 0 && (p.stock || 0) <= 5;
       if (stockFilter === 'ready') return (p.stock || 0) > 5;
       return true;
+    })
+    .filter(p => {
+      if (categoryFilter && p.category !== categoryFilter) return false;
+      const hasRecipe = recipeProductIds.has(p.id);
+      const hasHpp = (p.cost_price || 0) > 0;
+      const matchesReadiness =
+        readinessFilter === 'all'
+        || (readinessFilter === 'complete' && hasRecipe && hasHpp)
+        || (readinessFilter === 'missingRecipe' && !hasRecipe)
+        || (readinessFilter === 'missingHpp' && !hasHpp);
+      const matchesSource =
+        sourceFilter === 'all'
+        || (sourceFilter === 'production' && productionProductIds.has(p.id))
+        || (sourceFilter === 'manual' && !productionProductIds.has(p.id));
+      return matchesReadiness && matchesSource;
     });
 
   const productStats = {
@@ -201,7 +220,7 @@ export default function Produk() {
         ))}
       </div>
 
-      <div className="flex flex-col lg:flex-row gap-3 lg:items-center lg:justify-between">
+      <div className="flex flex-col gap-3">
         <div className="relative w-full sm:w-80">
           <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
           <input 
@@ -212,7 +231,8 @@ export default function Produk() {
             className="w-full pl-10 pr-4 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 rounded-xl text-sm outline-none transition-all shadow-sm"
           />
         </div>
-        <div className="flex gap-1 bg-white dark:bg-gray-900 rounded-xl p-1 border border-gray-100 dark:border-gray-800 shadow-sm overflow-x-auto">
+        <div className="flex flex-wrap gap-2">
+          <div className="flex gap-1 bg-white dark:bg-gray-900 rounded-xl p-1 border border-gray-100 dark:border-gray-800 shadow-sm overflow-x-auto">
           {[
             { id: 'all', label: 'Semua' },
             { id: 'ready', label: 'Tersedia' },
@@ -228,6 +248,25 @@ export default function Produk() {
               {filter.label}
             </button>
           ))}
+          </div>
+          <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="px-3 py-2 bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl text-sm outline-none shadow-sm">
+            <option value="">Semua kategori</option>
+            {productCategories.map(category => <option key={category} value={category}>{category}</option>)}
+          </select>
+          <select value={readinessFilter} onChange={(e) => setReadinessFilter(e.target.value)} className="px-3 py-2 bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl text-sm outline-none shadow-sm">
+            <option value="all">Semua data</option>
+            <option value="complete">Data lengkap</option>
+            <option value="missingRecipe">Belum ada resep</option>
+            <option value="missingHpp">HPP belum dihitung</option>
+          </select>
+          <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)} className="px-3 py-2 bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl text-sm outline-none shadow-sm">
+            <option value="all">Semua sumber</option>
+            <option value="production">Stok produksi</option>
+            <option value="manual">Stok manual</option>
+          </select>
+          <button type="button" onClick={() => { setSearchTerm(''); setStockFilter('all'); setCategoryFilter(''); setReadinessFilter('all'); setSourceFilter('all'); }} className="px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-primary-600 hover:bg-white dark:hover:bg-gray-900 transition-colors">
+            Reset
+          </button>
         </div>
       </div>
 

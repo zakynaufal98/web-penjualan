@@ -19,6 +19,7 @@ export default function Laporan() {
   const [activeTab, setActiveTab] = useState('bulanan');
   const [products, setProducts] = useState([]);
   const [productFilter, setProductFilter] = useState('');
+  const [paymentFilter, setPaymentFilter] = useState('');
 
   // ── Monthly ──
   const [loading, setLoading]         = useState(true);
@@ -42,8 +43,8 @@ export default function Laporan() {
 
   useEffect(() => { fetchProducts(); }, []);
   useEffect(() => { if (activeTab === 'bulanan') fetchReportData(); }, [year, activeTab]);
-  useEffect(() => { if (activeTab === 'rekap')   fetchWeeklyReport(); }, [weekStart, activeTab, productFilter]);
-  useEffect(() => { if (activeTab === 'harian')  fetchDailyReport(); }, [selectedDay, activeTab, productFilter]);
+  useEffect(() => { if (activeTab === 'rekap')   fetchWeeklyReport(); }, [weekStart, activeTab, productFilter, paymentFilter]);
+  useEffect(() => { if (activeTab === 'harian')  fetchDailyReport(); }, [selectedDay, activeTab, productFilter, paymentFilter]);
 
   const fetchProducts = async () => {
     const { data } = await supabase.from('products').select('id, name').order('name');
@@ -105,7 +106,7 @@ export default function Laporan() {
       const key = format(day, 'yyyy-MM-dd');
 
       const dayProd  = (prodData  || []).filter(p => format(parseISO(p.production_date),  'yyyy-MM-dd') === key && (!productFilter || p.product_id === productFilter));
-      const daySales = (salesData || []).filter(s => format(parseISO(s.transaction_date), 'yyyy-MM-dd') === key && (!productFilter || s.product_id === productFilter));
+      const daySales = (salesData || []).filter(s => format(parseISO(s.transaction_date), 'yyyy-MM-dd') === key && (!productFilter || s.product_id === productFilter) && (!paymentFilter || s.payment_method === paymentFilter));
 
       const map = {};
       dayProd.forEach(p => {
@@ -173,7 +174,7 @@ export default function Laporan() {
       map[name].gagal += p.failed || 0;
       map[name].hasProd = true;
     });
-    (salesData || []).filter(s => !productFilter || s.product_id === productFilter).forEach(s => {
+    (salesData || []).filter(s => (!productFilter || s.product_id === productFilter) && (!paymentFilter || s.payment_method === paymentFilter)).forEach(s => {
       const name = s.products?.name || 'Produk';
       if (!map[name]) map[name] = { name, bawa: 0, terjual: 0, total: 0, hasProd: false };
       map[name].terjual += s.quantity;
@@ -285,16 +286,26 @@ export default function Laporan() {
 
       <div className="flex flex-col sm:flex-row gap-3 sm:items-center justify-between">
         {activeTab !== 'bulanan' ? (
-          <select
-            value={productFilter}
-            onChange={(e) => setProductFilter(e.target.value)}
-            className="w-full sm:w-72 px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500"
-          >
-            <option value="">Semua produk</option>
-            {products.map(product => (
-              <option key={product.id} value={product.id}>{product.name}</option>
-            ))}
-          </select>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full sm:w-auto">
+            <select
+              value={productFilter}
+              onChange={(e) => setProductFilter(e.target.value)}
+              className="w-full sm:w-72 px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500"
+            >
+              <option value="">Semua produk</option>
+              {products.map(product => (
+                <option key={product.id} value={product.id}>{product.name}</option>
+              ))}
+            </select>
+            <select
+              value={paymentFilter}
+              onChange={(e) => setPaymentFilter(e.target.value)}
+              className="w-full sm:w-48 px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500"
+            >
+              <option value="">Semua bayar</option>
+              {['Cash', 'Transfer', 'QRIS', 'Debit'].map(method => <option key={method} value={method}>{method}</option>)}
+            </select>
+          </div>
         ) : <span />}
         <div className="flex gap-2">
           <button

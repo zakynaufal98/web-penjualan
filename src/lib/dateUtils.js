@@ -5,9 +5,22 @@ export const dateToInputValue = (date) => {
   return local.toISOString().slice(0, 10);
 };
 
+export const currentTimeInputValue = () => timeInputValue(new Date());
+
+export const timeInputValue = (date) => {
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+};
+
+export const dateTimeInputToLocalISOString = (dateValue, timeValue) => {
+  if (!dateValue) return new Date().toISOString();
+  const safeTime = timeValue || '12:00';
+  return new Date(`${dateValue}T${safeTime}:00`).toISOString();
+};
+
 export const dateInputToLocalISOString = (value) => {
-  if (!value) return new Date().toISOString();
-  return new Date(`${value}T12:00:00`).toISOString();
+  return dateTimeInputToLocalISOString(value, '12:00');
 };
 
 export const localDayRangeISO = (date) => {

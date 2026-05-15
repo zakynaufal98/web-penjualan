@@ -11,7 +11,7 @@
 //
 // Setelah membuat tabel, aktifkan RLS dan tambahkan policy sesuai kebutuhan.
 
-import { useState, useEffect } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { Plus, Trash2, X, Loader2, AlertCircle, ClipboardList, UtensilsCrossed, Edit2, PackageCheck } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
@@ -21,11 +21,18 @@ import ConfirmDialog from '../components/ui/ConfirmDialog';
 import { friendlyError } from '../lib/errorUtils';
 import { format, isSameDay } from 'date-fns';
 import { id as localeId } from 'date-fns/locale';
-import { dateInputToLocalISOString, todayInputValue } from '../lib/dateUtils';
+import {
+  currentTimeInputValue,
+  dateTimeInputToLocalISOString,
+  dateToInputValue,
+  timeInputValue,
+  todayInputValue,
+} from '../lib/dateUtils';
 import { reconcileProductStock } from '../lib/productStock';
 
 export default function Produksi() {
   const [logs, setLogs] = useState([]);
+  const [filters, setFilters] = useState({ period: 'all', productId: '', status: 'all' });
   const [salesMap, setSalesMap] = useState({});
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -33,7 +40,14 @@ export default function Produksi() {
   const [tableExists, setTableExists] = useState(true);
   const [productionCheck, setProductionCheck] = useState({ status: 'idle', maxUnits: null, shortages: [] });
 
-  const [formData, setFormData] = useState({ product_id: '', quantity: 1, failed: 0, notes: '', production_date: todayInputValue() });
+  const [formData, setFormData] = useState({
+    product_id: '',
+    quantity: 1,
+    failed: 0,
+    notes: '',
+    production_date: todayInputValue(),
+    production_time: currentTimeInputValue(),
+  });
   const [editingLog, setEditingLog] = useState(null);
   const [formLoading, setFormLoading] = useState(false);
   const [error, setError] = useState('');
@@ -56,7 +70,14 @@ export default function Produksi() {
     const productId = location.state?.productId;
     if (!productId || products.length === 0 || isModalOpen) return;
     setEditingLog(null);
-    setFormData({ product_id: productId, quantity: 1, failed: 0, notes: '', production_date: todayInputValue() });
+    setFormData({
+      product_id: productId,
+      quantity: 1,
+      failed: 0,
+      notes: '',
+      production_date: todayInputValue(),
+      production_time: currentTimeInputValue(),
+    });
     setError('');
     setIsModalOpen(true);
     navigate('/produksi', { replace: true, state: null });
@@ -235,18 +256,27 @@ export default function Produksi() {
 
   const resetForm = () => {
     setEditingLog(null);
-    setFormData({ product_id: '', quantity: 1, failed: 0, notes: '', production_date: todayInputValue() });
+    setFormData({
+      product_id: '',
+      quantity: 1,
+      failed: 0,
+      notes: '',
+      production_date: todayInputValue(),
+      production_time: currentTimeInputValue(),
+    });
     setError('');
   };
 
   const openEdit = (log) => {
+    const productionDate = log.production_date ? new Date(log.production_date) : new Date();
     setEditingLog(log);
     setFormData({
       product_id: log.product_id,
       quantity: log.quantity,
       failed: log.failed || 0,
       notes: log.notes || '',
-      production_date: format(new Date(log.production_date), 'yyyy-MM-dd'),
+      production_date: dateToInputValue(productionDate),
+      production_time: timeInputValue(productionDate),
     });
     setError('');
     setIsModalOpen(true);
@@ -290,7 +320,7 @@ export default function Produksi() {
         quantity: newBawa,
         failed: newFailed,
         notes: formData.notes || null,
-        production_date: dateInputToLocalISOString(formData.production_date),
+        production_date: dateTimeInputToLocalISOString(formData.production_date, formData.production_time),
       }).eq('id', editingLog.id);
 
       if (updateError) {
@@ -358,7 +388,7 @@ export default function Produksi() {
         failed: newFailed,
         notes: formData.notes || null,
         created_by: user?.id,
-        production_date: dateInputToLocalISOString(formData.production_date),
+        production_date: dateTimeInputToLocalISOString(formData.production_date, formData.production_time),
       }]);
 
       if (insertError) {
@@ -453,6 +483,35 @@ export default function Produksi() {
   const formFailedQty = parseInt(formData.failed) || 0;
   const formTotalQty = formSuccessQty + formFailedQty;
   const productStockAfter = selectedProduct ? (selectedProduct.stock || 0) + formSuccessQty : null;
+  const filteredLogs = useMemo(() => logs.filter(log => {
+    const allocation = salesMap[log.id] || {};
+    const terjual = allocation.sold || 0;
+    const konsumsi = log.konsumsi || 0;
+    const sisaBatch = allocation.remaining ?? Math.max(0, (log.quantity || 0) - konsumsi - terjual);
+    const date = new Date(log.production_date);
+    const now = new Date();
+    const start = new Date(now);
+    let matchesPeriod = true;
+    if (filters.period === 'today') matchesPeriod = date.toDateString() === now.toDateString();
+    if (filters.period === 'week') {
+      start.setDate(now.getDate() - 6);
+      start.setHours(0, 0, 0, 0);
+      matchesPeriod = date >= start;
+    }
+    if (filters.period === 'month') {
+      start.setDate(1);
+      start.setHours(0, 0, 0, 0);
+      matchesPeriod = date >= start;
+    }
+    const matchesProduct = !filters.productId || log.product_id === filters.productId;
+    const matchesStatus =
+      filters.status === 'all'
+      || (filters.status === 'remaining' && sisaBatch > 0)
+      || (filters.status === 'empty' && sisaBatch <= 0)
+      || (filters.status === 'failed' && (log.failed || 0) > 0)
+      || (filters.status === 'consumed' && konsumsi > 0);
+    return matchesPeriod && matchesProduct && matchesStatus;
+  }), [logs, salesMap, filters]);
 
   if (!tableExists) {
     return (
@@ -503,9 +562,31 @@ export default function Produksi() {
 
       {/* Tabel */}
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
-        <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50">
+        <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 space-y-3">
           <div className="flex items-center gap-2 text-sm font-medium text-gray-600 dark:text-gray-400">
             <ClipboardList size={16} /> Riwayat Produksi
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-[9rem_minmax(0,1fr)_11rem_auto] gap-2">
+            <select value={filters.period} onChange={(e) => setFilters({ ...filters, period: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="all">Semua waktu</option>
+              <option value="today">Hari ini</option>
+              <option value="week">7 hari</option>
+              <option value="month">Bulan ini</option>
+            </select>
+            <select value={filters.productId} onChange={(e) => setFilters({ ...filters, productId: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="">Semua produk</option>
+              {products.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}
+            </select>
+            <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
+              <option value="all">Semua status</option>
+              <option value="remaining">Masih ada sisa</option>
+              <option value="empty">Batch habis</option>
+              <option value="failed">Ada gagal</option>
+              <option value="consumed">Ada konsumsi</option>
+            </select>
+            <button type="button" onClick={() => setFilters({ period: 'all', productId: '', status: 'all' })} className="px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-primary-600 hover:bg-white dark:hover:bg-gray-900 transition-colors">
+              Reset
+            </button>
           </div>
         </div>
         <div className="overflow-x-auto">
@@ -539,8 +620,10 @@ export default function Produksi() {
                     </div>
                   </td>
                 </tr>
+              ) : filteredLogs.length === 0 ? (
+                <tr><td colSpan="9" className="p-8 text-center text-gray-500">Tidak ada produksi yang cocok dengan filter.</td></tr>
               ) : (
-                logs.map((log) => {
+                filteredLogs.map((log) => {
                   const allocation = salesMap[log.id] || {};
                   const terjual  = allocation.sold || 0;
                   const konsumsi = log.konsumsi || 0;
@@ -548,7 +631,7 @@ export default function Produksi() {
                   return (
                   <tr key={log.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
-                      {format(new Date(log.production_date), 'dd MMM yyyy, HH:mm', { locale: localeId })}
+                      {format(new Date(log.production_date), 'EEEE, dd MMM yyyy, HH:mm', { locale: localeId })}
                     </td>
                     <td className="p-4">
                       <div className="font-medium text-gray-900 dark:text-gray-100">{log.products?.name || 'Produk Dihapus'}</div>
@@ -745,15 +828,26 @@ export default function Produksi() {
                 )}
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Tanggal Produksi</label>
-                <input
-                  type="date" required
-                  value={formData.production_date}
-                  max={todayInputValue()}
-                  onChange={(e) => setFormData({ ...formData, production_date: e.target.value })}
-                  className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Tanggal Produksi</label>
+                  <input
+                    type="date" required
+                    value={formData.production_date}
+                    max={todayInputValue()}
+                    onChange={(e) => setFormData({ ...formData, production_date: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jam</label>
+                  <input
+                    type="time" required
+                    value={formData.production_time}
+                    onChange={(e) => setFormData({ ...formData, production_time: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
