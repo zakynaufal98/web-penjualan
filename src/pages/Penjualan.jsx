@@ -192,6 +192,9 @@ const isInPeriod = (dateValue, period, startDate, endDate) => {
   return true;
 };
 
+const getTransactionTotal = (trx) => trx.total_price ?? ((trx.unit_price || 0) * (trx.quantity || 0));
+const formatRupiah = (value) => `Rp ${value.toLocaleString('id-ID')}`;
+
 export default function Penjualan() {
   const [searchTerm, setSearchTerm] = useState('');
   const [filters, setFilters] = useState({ period: 'all', productId: '', payment: '', customer: '', startDate: '', endDate: '' });
@@ -250,6 +253,28 @@ export default function Penjualan() {
     const matchesCustomer = !filters.customer || t.customer_name === filters.customer;
     return matchesSearch && matchesPeriod && matchesProduct && matchesPayment && matchesCustomer;
   }), [transactions, searchTerm, filters]);
+  const filteredSummary = useMemo(() => {
+    const summary = filteredTransactions.reduce((acc, trx) => {
+      const total = getTransactionTotal(trx);
+      const quantity = trx.quantity || 0;
+      const payment = trx.payment_method || 'Lainnya';
+
+      acc.totalRevenue += total;
+      acc.totalQuantity += quantity;
+      acc.paymentTotals[payment] = (acc.paymentTotals[payment] || 0) + total;
+      return acc;
+    }, { totalRevenue: 0, totalQuantity: 0, paymentTotals: {} });
+
+    const topPayment = Object.entries(summary.paymentTotals)
+      .sort(([, a], [, b]) => b - a)[0];
+
+    return {
+      ...summary,
+      transactionCount: filteredTransactions.length,
+      averageRevenue: filteredTransactions.length ? Math.round(summary.totalRevenue / filteredTransactions.length) : 0,
+      topPayment: topPayment ? { method: topPayment[0], total: topPayment[1] } : null,
+    };
+  }, [filteredTransactions]);
   const totalPages = Math.max(1, Math.ceil(filteredTransactions.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const paginatedTransactions = filteredTransactions.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -670,6 +695,31 @@ export default function Penjualan() {
           )}
         </div>
 
+        <div className="grid grid-cols-2 lg:grid-cols-5 border-b border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900">
+          <div className="px-4 py-3 border-r border-b lg:border-b-0 border-gray-100 dark:border-gray-800">
+            <p className="text-xs text-gray-500 dark:text-gray-400">Omzet filter</p>
+            <p className="mt-1 text-base font-bold text-emerald-600 dark:text-emerald-400">{formatRupiah(filteredSummary.totalRevenue)}</p>
+          </div>
+          <div className="px-4 py-3 border-b lg:border-r lg:border-b-0 border-gray-100 dark:border-gray-800">
+            <p className="text-xs text-gray-500 dark:text-gray-400">Transaksi</p>
+            <p className="mt-1 text-base font-bold text-gray-900 dark:text-gray-100">{filteredSummary.transactionCount.toLocaleString('id-ID')}</p>
+          </div>
+          <div className="px-4 py-3 border-r border-b lg:border-b-0 border-gray-100 dark:border-gray-800">
+            <p className="text-xs text-gray-500 dark:text-gray-400">Qty terjual</p>
+            <p className="mt-1 text-base font-bold text-gray-900 dark:text-gray-100">{filteredSummary.totalQuantity.toLocaleString('id-ID')} pcs</p>
+          </div>
+          <div className="px-4 py-3 border-b lg:border-r lg:border-b-0 border-gray-100 dark:border-gray-800">
+            <p className="text-xs text-gray-500 dark:text-gray-400">Rata-rata</p>
+            <p className="mt-1 text-base font-bold text-gray-900 dark:text-gray-100">{formatRupiah(filteredSummary.averageRevenue)}</p>
+          </div>
+          <div className="col-span-2 lg:col-span-1 px-4 py-3">
+            <p className="text-xs text-gray-500 dark:text-gray-400">Bayar terbesar</p>
+            <p className="mt-1 text-base font-bold text-gray-900 dark:text-gray-100">
+              {filteredSummary.topPayment ? `${filteredSummary.topPayment.method} · ${formatRupiah(filteredSummary.topPayment.total)}` : '-'}
+            </p>
+          </div>
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse min-w-[700px]">
             <thead>
@@ -720,7 +770,7 @@ export default function Penjualan() {
                     </td>
                     <td className="p-4 text-gray-900 dark:text-gray-100 font-medium whitespace-nowrap">{trx.products?.name || 'Produk Dihapus'}</td>
                     <td className="p-4 text-right text-gray-900 dark:text-gray-100">{trx.quantity}</td>
-                    <td className="p-4 text-right font-medium text-emerald-600 dark:text-emerald-400 whitespace-nowrap">Rp {trx.total_price?.toLocaleString('id-ID')}</td>
+                    <td className="p-4 text-right font-medium text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{formatRupiah(getTransactionTotal(trx))}</td>
                     <td className="p-4">
                       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
                         {trx.payment_method}

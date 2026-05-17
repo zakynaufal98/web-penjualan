@@ -165,28 +165,40 @@ export default function Produksi() {
     return qty;
   };
 
+  const toFiniteNumber = (value, fallback = 0) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+  };
+
+  const hasFiniteNumber = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
+  const formatFixed = (value, digits = 2) => toFiniteNumber(value).toFixed(digits);
+
   const getIngredientUsage = (item, batchQty) => {
     const master = item.ingredient_masters;
     if (!master) return { stockDelta: 0, needBase: null, stockBase: null, remainingBase: null, baseUnit: null };
-    const totalInRecipeUnit = item.quantity_per_unit * batchQty;
-    if (!master.items_per_unit || !master.base_unit || item.unit === master.unit) {
+    const quantityPerUnit = toFiniteNumber(item.quantity_per_unit);
+    const batchQuantity = toFiniteNumber(batchQty);
+    const currentStock = toFiniteNumber(master.current_stock);
+    const itemsPerUnit = toFiniteNumber(master.items_per_unit);
+    const hasBaseUnit = itemsPerUnit > 0 && Boolean(master.base_unit);
+    const totalInRecipeUnit = quantityPerUnit * batchQuantity;
+    if (!hasBaseUnit || item.unit === master.unit) {
       const stockDelta = convertUnit(totalInRecipeUnit, item.unit, master.unit);
-      const hasBase = master.items_per_unit && master.base_unit;
       return {
         stockDelta,
-        needBase: hasBase ? stockDelta * master.items_per_unit : null,
-        stockBase: hasBase ? (master.current_stock || 0) * master.items_per_unit : null,
-        remainingBase: hasBase ? ((master.current_stock || 0) - stockDelta) * master.items_per_unit : null,
-        baseUnit: hasBase ? master.base_unit : null,
+        needBase: hasBaseUnit ? stockDelta * itemsPerUnit : null,
+        stockBase: hasBaseUnit ? currentStock * itemsPerUnit : null,
+        remainingBase: hasBaseUnit ? (currentStock - stockDelta) * itemsPerUnit : null,
+        baseUnit: hasBaseUnit ? master.base_unit : null,
       };
     }
     const totalInBaseUnit = convertUnit(totalInRecipeUnit, item.unit, master.base_unit);
-    const stockDelta = totalInBaseUnit / master.items_per_unit;
+    const stockDelta = totalInBaseUnit / itemsPerUnit;
     return {
       stockDelta,
       needBase: totalInBaseUnit,
-      stockBase: (master.current_stock || 0) * master.items_per_unit,
-      remainingBase: ((master.current_stock || 0) - stockDelta) * master.items_per_unit,
+      stockBase: currentStock * itemsPerUnit,
+      remainingBase: (currentStock - stockDelta) * itemsPerUnit,
       baseUnit: master.base_unit,
     };
   };
@@ -220,20 +232,30 @@ export default function Produksi() {
       const perUnitNeed = getIngredientStockDelta(item, 1);
       const usage = getIngredientUsage(item, totalQty);
       const totalNeed = usage.stockDelta;
-      if (perUnitNeed > 0) maxUnits = Math.min(maxUnits, Math.floor((master.current_stock || 0) / perUnitNeed));
+      const currentStock = toFiniteNumber(master.current_stock);
+      if (perUnitNeed > 0) maxUnits = Math.min(maxUnits, Math.floor(currentStock / perUnitNeed));
       items.push({
         name: master.name,
         need: totalNeed,
-        stock: master.current_stock || 0,
-        remaining: (master.current_stock || 0) - totalNeed,
+        stock: currentStock,
+        remaining: currentStock - totalNeed,
         unit: master.unit,
         needBase: usage.needBase,
         stockBase: usage.stockBase,
         remainingBase: usage.remainingBase,
         baseUnit: usage.baseUnit,
       });
-      if ((master.current_stock || 0) < totalNeed) {
-        shortages.push({ name: master.name, need: totalNeed, stock: master.current_stock || 0, unit: master.unit });
+      if (currentStock < totalNeed) {
+        shortages.push({
+          name: master.name,
+          need: totalNeed,
+          stock: currentStock,
+          unit: master.unit,
+          needBase: usage.needBase,
+          stockBase: usage.stockBase,
+          remainingBase: usage.remainingBase,
+          baseUnit: usage.baseUnit,
+        });
       }
     });
 
@@ -905,8 +927,8 @@ export default function Produksi() {
                     <p className="font-semibold">Bahan belum cukup untuk produksi ini.</p>
                     {productionCheck.shortages.slice(0, 3).map(item => (
                       <p key={item.name}>
-                        {item.name}: perlu {item.need.toFixed(2)} {item.unit}
-                        {item.needBase !== null ? ` (${item.needBase.toFixed(2)} ${item.baseUnit})` : ''}, stok {item.stock.toFixed(2)} {item.unit}
+                        {item.name}: perlu {formatFixed(item.need)} {item.unit}
+                        {hasFiniteNumber(item.needBase) ? ` (${formatFixed(item.needBase)} ${item.baseUnit})` : ''}, stok {formatFixed(item.stock)} {item.unit}
                       </p>
                     ))}
                   </div>
@@ -985,9 +1007,9 @@ export default function Produksi() {
                         <div key={item.name} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
                           <span className="min-w-0 truncate text-gray-600 dark:text-gray-300">{item.name}</span>
                           <span className={item.remaining < 0 ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-500 dark:text-gray-400'}>
-                            -{item.need.toFixed(2)} {item.unit}
-                            {item.needBase !== null ? ` (${item.needBase.toFixed(2)} ${item.baseUnit})` : ''}, sisa {Math.max(0, item.remaining).toFixed(2)} {item.unit}
-                            {item.remainingBase !== null ? ` (${Math.max(0, item.remainingBase).toFixed(2)} ${item.baseUnit})` : ''}
+                            -{formatFixed(item.need)} {item.unit}
+                            {hasFiniteNumber(item.needBase) ? ` (${formatFixed(item.needBase)} ${item.baseUnit})` : ''}, sisa {formatFixed(Math.max(0, toFiniteNumber(item.remaining)))} {item.unit}
+                            {hasFiniteNumber(item.remainingBase) ? ` (${formatFixed(Math.max(0, toFiniteNumber(item.remainingBase)))} ${item.baseUnit})` : ''}
                           </span>
                         </div>
                       ))}
