@@ -50,10 +50,10 @@ export default function Sidebar() {
 
   return (
     <>
-      {/* Mobile overlay */}
+      {/* Tablet overlay */}
       {sidebarOpen && (
         <div
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-20 lg:hidden"
+          className="hidden md:block lg:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-20"
           onClick={() => setSidebarOpen(false)}
         />
       )}

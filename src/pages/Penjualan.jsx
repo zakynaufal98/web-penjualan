@@ -11,7 +11,7 @@ import {
   timeInputValue,
   todayInputValue,
 } from '../lib/dateUtils';
-import { reconcileProductStock } from '../lib/productStock';
+import { reconcileProductStock, resolveProductionStocks } from '../lib/productStock';
 import { addActivity } from '../lib/activityLog';
 
 const ProductPicker = ({ products, value, onChange }) => {
@@ -305,7 +305,7 @@ export default function Penjualan() {
 
   const fetchProducts = async () => {
     const { data } = await supabase.from('products').select('*').eq('is_available', true);
-    setProducts(data || []);
+    setProducts(await resolveProductionStocks(data || [], { persist: true }));
   };
 
   const updateProductStock = async (productId, delta) => {
@@ -356,8 +356,9 @@ export default function Penjualan() {
     }
 
     // Selalu fetch stok terbaru dari DB — hindari stale local state
-    const { data: freshProduct } = await supabase
+    const { data: rawFreshProduct } = await supabase
       .from('products').select('*').eq('id', formData.product_id).single();
+    const [freshProduct] = await resolveProductionStocks(rawFreshProduct ? [rawFreshProduct] : [], { persist: true });
     if (!freshProduct) {
       setError('Produk tidak ditemukan.');
       setFormLoading(false);
@@ -454,11 +455,12 @@ export default function Penjualan() {
     }
 
     setQuickSaleLoading(true);
-    const { data: freshProduct } = await supabase
+    const { data: rawFreshProduct } = await supabase
       .from('products')
       .select('*')
       .eq('id', quickSale.product_id)
       .single();
+    const [freshProduct] = await resolveProductionStocks(rawFreshProduct ? [rawFreshProduct] : [], { persist: true });
 
     if (!freshProduct) {
       setToast({ message: 'Produk tidak ditemukan.', type: 'error' });
@@ -504,21 +506,34 @@ export default function Penjualan() {
 
   const executeDelete = async (id) => {
     const trxToDelete = transactions.find(t => t.id === id);
+    if (!trxToDelete) {
+      setToast({ message: 'Transaksi tidak ditemukan.', type: 'error' });
+      return;
+    }
+
+    const { error: restoreError } = await updateProductStock(trxToDelete.product_id, trxToDelete.quantity);
+    if (restoreError) {
+      setToast({ message: `Gagal mengembalikan stok produk: ${friendlyError(restoreError)}`, type: 'error' });
+      return;
+    }
+
     const { error: delError } = await supabase.from('sales').delete().eq('id', id);
     if (delError) {
+      await updateProductStock(trxToDelete.product_id, -trxToDelete.quantity);
       setToast({ message: 'Gagal menghapus transaksi.', type: 'error' });
     } else {
-      if (trxToDelete) {
-        const { reconciled } = await reconcileProductStock(trxToDelete.product_id);
-        if (!reconciled) {
-          await updateProductStock(trxToDelete.product_id, trxToDelete.quantity);
-        }
-      }
-      setToast({ message: 'Transaksi berhasil dihapus.', type: 'success' });
+      const stockSync = await reconcileProductStock(trxToDelete.product_id);
+
+      setToast({
+        message: stockSync.error
+          ? `Transaksi terhapus dan stok dikembalikan, tapi sinkronisasi stok gagal: ${friendlyError(stockSync.error)}`
+          : 'Transaksi berhasil dihapus dan stok produk dikembalikan.',
+        type: stockSync.error ? 'error' : 'success',
+      });
       addActivity({
         type: 'sales',
         title: 'Transaksi penjualan dihapus',
-        description: trxToDelete ? `${trxToDelete.products?.name || 'Produk'} ${trxToDelete.quantity} pcs.` : undefined,
+        description: `${trxToDelete.products?.name || 'Produk'} ${trxToDelete.quantity} pcs.`,
       });
       fetchTransactions();
       fetchProducts();

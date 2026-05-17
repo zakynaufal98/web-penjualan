@@ -28,7 +28,7 @@ import {
   timeInputValue,
   todayInputValue,
 } from '../lib/dateUtils';
-import { reconcileProductStock } from '../lib/productStock';
+import { reconcileProductStock, resolveProductionStocks } from '../lib/productStock';
 import { addActivity } from '../lib/activityLog';
 
 export default function Produksi() {
@@ -153,7 +153,7 @@ export default function Produksi() {
 
   const fetchProducts = async () => {
     const { data } = await supabase.from('products').select('id, name, stock').order('name');
-    setProducts(data || []);
+    setProducts(await resolveProductionStocks(data || [], { persist: true }));
   };
 
   const convertUnit = (qty, fromUnit, toUnit) => {
@@ -268,19 +268,21 @@ export default function Produksi() {
   };
 
   const adjustIngredientStock = async (productId, batchQty, sign) => {
-    const { data: recipeItems } = await supabase
+    const { data: recipeItems, error: recipeError } = await supabase
       .from('recipes')
       .select('quantity_per_unit, unit, ingredient_master_id, ingredient_masters(id, unit, items_per_unit, base_unit)')
       .eq('product_id', productId);
-    if (!recipeItems || recipeItems.length === 0) return false;
+    if (recipeError) return { hasRecipe: false, error: recipeError };
+    if (!recipeItems || recipeItems.length === 0) return { hasRecipe: false, error: null };
     for (const item of recipeItems) {
       const master = item.ingredient_masters;
       if (!master) continue;
 
       const delta = getIngredientStockDelta(item, batchQty);
-      await supabase.rpc('adjust_ingredient_stock', { p_id: master.id, p_delta: delta * sign });
+      const { error: adjustError } = await supabase.rpc('adjust_ingredient_stock', { p_id: master.id, p_delta: delta * sign });
+      if (adjustError) return { hasRecipe: true, error: adjustError };
     }
-    return true;
+    return { hasRecipe: true, error: null };
   };
 
   const deductIngredientStock  = (productId, qty) => adjustIngredientStock(productId, qty, -1);
@@ -415,18 +417,24 @@ export default function Produksi() {
         return;
       }
 
+      let ingredientAdjustment = { error: null };
       if (sameProduct) {
         const totalDiff = newTotal - oldTotal;
-        if (totalDiff > 0) await deductIngredientStock(formData.product_id, totalDiff);
-        else if (totalDiff < 0) await restoreIngredientStock(formData.product_id, Math.abs(totalDiff));
+        if (totalDiff > 0) ingredientAdjustment = await deductIngredientStock(formData.product_id, totalDiff);
+        else if (totalDiff < 0) ingredientAdjustment = await restoreIngredientStock(formData.product_id, Math.abs(totalDiff));
       } else {
-        await restoreIngredientStock(editingLog.product_id, oldTotal);
-        await deductIngredientStock(formData.product_id, newTotal);
+        const restoreResult = await restoreIngredientStock(editingLog.product_id, oldTotal);
+        ingredientAdjustment = restoreResult.error ? restoreResult : await deductIngredientStock(formData.product_id, newTotal);
       }
 
       await reconcileProductStock(editingLog.product_id, { force: true });
       await reconcileProductStock(formData.product_id, { force: true });
-      setToast({ message: 'Catatan produksi berhasil diperbarui!', type: 'success' });
+      setToast({
+        message: ingredientAdjustment.error
+          ? `Catatan diperbarui, tapi stok bahan gagal disesuaikan: ${friendlyError(ingredientAdjustment.error)}`
+          : 'Catatan produksi berhasil diperbarui!',
+        type: ingredientAdjustment.error ? 'error' : 'success',
+      });
     } else {
       // ── MODE TAMBAH ──
       const { error: insertError } = await supabase.from('production_logs').insert([{
@@ -446,10 +454,12 @@ export default function Produksi() {
 
       const { data: stockUpdated } = await updateProductStock(formData.product_id, newBawa);
 
-      const hasRecipe = await deductIngredientStock(formData.product_id, newTotal);
+      const ingredientAdjustment = await deductIngredientStock(formData.product_id, newTotal);
       if (!stockUpdated || stockUpdated.length === 0) {
         setToast({ message: 'Produksi tersimpan tapi stok produk gagal bertambah. Jalankan SQL: CREATE POLICY "Allow update products" ON products FOR UPDATE TO authenticated USING (true) WITH CHECK (true);', type: 'error' });
-      } else if (!hasRecipe) {
+      } else if (ingredientAdjustment.error) {
+        setToast({ message: `Produksi tersimpan tapi stok bahan gagal dikurangi: ${friendlyError(ingredientAdjustment.error)}`, type: 'error' });
+      } else if (!ingredientAdjustment.hasRecipe) {
         setToast({ message: 'Produksi tersimpan. Resep belum diatur — stok bahan tidak dikurangi.', type: 'info' });
       } else {
         setToast({ message: 'Produksi berhasil dicatat!', type: 'success' });
@@ -519,15 +529,28 @@ export default function Produksi() {
 
   const executeDelete = async (id, productId, quantity, failed) => {
     const total = quantity + (failed || 0);
+    const restoreResult = await restoreIngredientStock(productId, total);
+    if (restoreResult.error) {
+      setToast({ message: `Gagal mengembalikan stok bahan: ${friendlyError(restoreResult.error)}`, type: 'error' });
+      return;
+    }
+
     const { error: deleteError } = await supabase.from('production_logs').delete().eq('id', id);
     if (deleteError) {
+      if (restoreResult.hasRecipe) {
+        await deductIngredientStock(productId, total);
+      }
       setToast({ message: 'Gagal menghapus catatan produksi.', type: 'error' });
       return;
     }
-    await restoreIngredientStock(productId, total);
 
     await reconcileProductStock(productId, { force: true });
-    setToast({ message: 'Catatan produksi dihapus dan stok dikembalikan.', type: 'success' });
+    setToast({
+      message: restoreResult.hasRecipe
+        ? 'Catatan produksi dihapus dan stok dikembalikan.'
+        : 'Catatan produksi dihapus. Resep tidak ditemukan, jadi tidak ada stok bahan yang dikembalikan.',
+      type: restoreResult.hasRecipe ? 'success' : 'info',
+    });
     addActivity({
       type: 'production',
       title: 'Catatan produksi dihapus',
@@ -541,6 +564,9 @@ export default function Produksi() {
   const todayLogs = logs.filter(l => isSameDay(new Date(l.production_date), today));
   const todayTotal = todayLogs.reduce((sum, l) => sum + l.quantity, 0);
   const selectedProduct = products.find(p => p.id === formData.product_id);
+  const productStockById = useMemo(() => (
+    Object.fromEntries(products.map(product => [product.id, product.stock || 0]))
+  ), [products]);
   const formSuccessQty = parseInt(formData.quantity) || 0;
   const formFailedQty = parseInt(formData.failed) || 0;
   const formTotalQty = formSuccessQty + formFailedQty;
@@ -736,6 +762,9 @@ export default function Produksi() {
                       <div className="font-medium text-gray-900 dark:text-gray-100">{log.products?.name || 'Produk Dihapus'}</div>
                       <div className={`text-xs mt-0.5 font-medium ${sisaBatch === 0 ? 'text-red-500' : sisaBatch <= 5 ? 'text-amber-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
                         Sisa batch: {sisaBatch} pcs
+                      </div>
+                      <div className="text-xs mt-0.5 text-gray-500 dark:text-gray-400">
+                        Stok jual total: {productStockById[log.product_id] ?? 0} pcs
                       </div>
                     </td>
                     <td className="p-4 text-right font-bold text-primary-600 dark:text-primary-400">
