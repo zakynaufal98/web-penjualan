@@ -82,7 +82,8 @@ export default function Header() {
         .select('name, quantity, unit, unit_price, total_price, purchase_date')
         .gte('purchase_date', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
       (expenses || []).forEach(item => {
-        const total = item.total_price || (['gr', 'ml'].includes(item.unit) ? item.unit_price : (item.quantity || 0) * (item.unit_price || 0));
+        const measuredUnit = ['kg', 'gr', 'liter', 'ml'].includes(item.unit);
+        const total = item.total_price || (measuredUnit ? item.unit_price : (item.quantity || 0) * (item.unit_price || 0));
         if (total >= notificationSettings.largeExpenseThreshold) {
           notifs.push({
             id: `expense-${item.name}-${item.purchase_date}`,

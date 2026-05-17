@@ -29,8 +29,12 @@ const getDisplayPrice = (ingredient) => {
   if (ingredient.items_per_unit && ingredient.base_unit) {
     return { price: ingredient.unit_price / ingredient.items_per_unit, unit: ingredient.base_unit };
   }
-  if (ingredient.unit === 'kg') return { price: ingredient.unit_price / 1000, unit: 'gr' };
-  if (ingredient.unit === 'liter') return { price: ingredient.unit_price / 1000, unit: 'ml' };
+  if (ingredient.unit === 'kg') {
+    return { price: ingredient.quantity > 0 ? ingredient.unit_price / (ingredient.quantity * 1000) : 0, unit: 'gr' };
+  }
+  if (ingredient.unit === 'liter') {
+    return { price: ingredient.quantity > 0 ? ingredient.unit_price / (ingredient.quantity * 1000) : 0, unit: 'ml' };
+  }
   if (ingredient.unit === 'gr' || ingredient.unit === 'ml') {
     return { price: ingredient.quantity > 0 ? ingredient.unit_price / ingredient.quantity : 0, unit: ingredient.unit };
   }
@@ -223,11 +227,11 @@ export default function KalkulatorHPP() {
           pricePerBase = ing.unit_price / ing.items_per_unit;
           qtyBase = ing.quantity * ing.items_per_unit;
         } else if (ing.unit === 'kg') {
-          pricePerBase = ing.unit_price / 1000;
           qtyBase = ing.quantity * 1000;
+          pricePerBase = qtyBase > 0 ? ing.unit_price / qtyBase : 0;
         } else if (ing.unit === 'liter') {
-          pricePerBase = ing.unit_price / 1000;
           qtyBase = ing.quantity * 1000;
+          pricePerBase = qtyBase > 0 ? ing.unit_price / qtyBase : 0;
         } else if (ing.unit === 'gr' || ing.unit === 'ml') {
           pricePerBase = ing.quantity > 0 ? ing.unit_price / ing.quantity : 0;
           qtyBase = ing.quantity;
@@ -249,7 +253,7 @@ export default function KalkulatorHPP() {
         avgUnitPrice = avgPricePerBase;
       }
 
-      const normalizedQuantity = template.unit === 'gr' || template.unit === 'ml' ? 1 : template.quantity;
+      const normalizedQuantity = ['kg', 'gr', 'liter', 'ml'].includes(template.unit) ? 1 : template.quantity;
       return { ...template, quantity: normalizedQuantity, unit_price: avgUnitPrice, _purchaseCount: entries.length };
     });
 
@@ -376,10 +380,11 @@ export default function KalkulatorHPP() {
     }
 
     // Kasus 2: beli per kg atau liter → konversi ke gr/ml
-    // unit_price adalah harga PER UNIT (bukan total), jadi jangan dibagi quantity
+    // unit_price adalah total harga pembelian, jadi dibagi total gr/ml yang dibeli.
     if (ingredient.unit === 'kg' || ingredient.unit === 'liter') {
-      const pricePerBase = ingredient.unit_price / 1000;
-      if (targetUnit === 'kg' || targetUnit === 'liter') return ingredient.unit_price;
+      const qtyBase = (ingredient.quantity || 0) * 1000;
+      const pricePerBase = qtyBase > 0 ? ingredient.unit_price / qtyBase : 0;
+      if (targetUnit === 'kg' || targetUnit === 'liter') return pricePerBase * 1000;
       return pricePerBase;
     }
 
@@ -449,7 +454,7 @@ export default function KalkulatorHPP() {
                   onChange={(e) => setBatchSize(e.target.value === '' ? 1 : parseInt(e.target.value) || 1)}
                   className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none transition-colors"
                 />
-                <p className="text-xs text-gray-400 mt-1">Resep ini menghasilkan berapa pcs?</p>
+                <p className="text-xs text-gray-400 mt-1">Contoh: vla 60 gr untuk 12 cup, isi 12 di sini.</p>
               </div>
             </div>
 
@@ -477,7 +482,7 @@ export default function KalkulatorHPP() {
                   </div>
                   
                   <div className="w-full">
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Gramasi/Jumlah</label>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Gramasi/Jumlah batch</label>
                     <div className="flex">
                       <input
                         type="number" min="0" step="any"

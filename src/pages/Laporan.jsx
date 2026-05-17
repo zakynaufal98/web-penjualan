@@ -7,12 +7,13 @@ import {
   getMonth, parseISO, startOfYear, endOfYear,
   startOfWeek, addDays, subDays, format, subWeeks, addWeeks,
 } from 'date-fns';
-import { localDayRangeISO, localWeekRangeISO } from '../lib/dateUtils';
+import { dateToInputValue, localDayRangeISO, localWeekRangeISO } from '../lib/dateUtils';
 
 const DAY_NAMES = ['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
 const MONTHS    = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+const isMeasuredUnit = (unit) => ['kg', 'gr', 'liter', 'ml'].includes(unit);
 const getExpenseTotal = (expense) =>
-  expense.total_price || (['gr', 'ml'].includes(expense.unit) ? expense.unit_price : expense.unit_price * expense.quantity);
+  expense.total_price || (isMeasuredUnit(expense.unit) ? (expense.unit_price || 0) : (expense.unit_price || 0) * (expense.quantity || 0));
 
 export default function Laporan() {
   const { bankInfo } = useStore();
@@ -41,10 +42,28 @@ export default function Laporan() {
   const [dayLoading, setDayLoading]     = useState(false);
   const [dayCopied, setDayCopied]       = useState(false);
 
+  // Rentang custom
+  const [rangeStart, setRangeStart] = useState(() => dateToInputValue(startOfWeek(new Date(), { weekStartsOn: 1 })));
+  const [rangeEnd, setRangeEnd] = useState(() => dateToInputValue(new Date()));
+  const [rangeLoading, setRangeLoading] = useState(false);
+  const [rangeReport, setRangeReport] = useState({
+    sales: 0,
+    cogs: 0,
+    expenses: 0,
+    profit: 0,
+    cashGap: 0,
+    produced: 0,
+    failed: 0,
+    consumed: 0,
+    unitsSold: 0,
+    topProducts: [],
+  });
+
   useEffect(() => { fetchProducts(); }, []);
   useEffect(() => { if (activeTab === 'bulanan') fetchReportData(); }, [year, activeTab]);
   useEffect(() => { if (activeTab === 'rekap')   fetchWeeklyReport(); }, [weekStart, activeTab, productFilter, paymentFilter]);
   useEffect(() => { if (activeTab === 'harian')  fetchDailyReport(); }, [selectedDay, activeTab, productFilter, paymentFilter]);
+  useEffect(() => { if (activeTab === 'rentang') fetchRangeReport(); }, [rangeStart, rangeEnd, activeTab, productFilter, paymentFilter]);
 
   const fetchProducts = async () => {
     const { data } = await supabase.from('products').select('id, name').order('name');
@@ -57,17 +76,18 @@ export default function Laporan() {
     const e = endOfYear(new Date(year, 11, 31)).toISOString();
 
     const [{ data: salesData }, { data: expData }] = await Promise.all([
-      supabase.from('sales').select('*').gte('transaction_date', s).lte('transaction_date', e),
+      supabase.from('sales').select('*, products(cost_price)').gte('transaction_date', s).lte('transaction_date', e),
       supabase.from('ingredients').select('*').gte('purchase_date', s).lte('purchase_date', e),
     ]);
 
-    const byMonth = MONTHS.map(m => ({ name: m, sales: 0, expenses: 0, profit: 0, margin: 0 }));
+    const byMonth = MONTHS.map(m => ({ name: m, sales: 0, cogs: 0, expenses: 0, profit: 0, cashGap: 0, margin: 0 }));
     let totalSalesYear = 0;
 
     (salesData || []).forEach(sale => {
       const m = getMonth(parseISO(sale.transaction_date));
       const amt = sale.total_price || sale.unit_price * sale.quantity;
       byMonth[m].sales += amt;
+      byMonth[m].cogs += (sale.products?.cost_price || 0) * (sale.quantity || 0);
       totalSalesYear += amt;
     });
     (expData || []).forEach(exp => {
@@ -77,7 +97,8 @@ export default function Laporan() {
 
     let marginSum = 0, activeMonths = 0;
     byMonth.forEach(m => {
-      m.profit = m.sales - m.expenses;
+      m.profit = m.sales - m.cogs;
+      m.cashGap = m.sales - m.expenses;
       if (m.sales > 0) { m.margin = (m.profit / m.sales) * 100; marginSum += m.margin; activeMonths++; }
     });
 
@@ -190,6 +211,59 @@ export default function Laporan() {
 
   const dayTotal = dayReport.reduce((s, it) => s + it.total, 0);
 
+  const fetchRangeReport = async () => {
+    if (!rangeStart || !rangeEnd) return;
+    setRangeLoading(true);
+    const startISO = new Date(`${rangeStart}T00:00:00`).toISOString();
+    const endISO = new Date(`${rangeEnd}T23:59:59`).toISOString();
+
+    const [{ data: salesData }, { data: expData }, { data: prodData }] = await Promise.all([
+      supabase.from('sales').select('*, products(name, cost_price)').gte('transaction_date', startISO).lte('transaction_date', endISO),
+      supabase.from('ingredients').select('*').gte('purchase_date', startISO).lte('purchase_date', endISO),
+      supabase.from('production_logs').select('quantity, failed, konsumsi, product_id, products(name)').gte('production_date', startISO).lte('production_date', endISO),
+    ]);
+
+    const productMap = {};
+    let sales = 0;
+    let cogs = 0;
+    let unitsSold = 0;
+    (salesData || [])
+      .filter(row => (!productFilter || row.product_id === productFilter) && (!paymentFilter || row.payment_method === paymentFilter))
+      .forEach(row => {
+        const total = row.total_price || (row.unit_price || 0) * (row.quantity || 0);
+        const cost = (row.products?.cost_price || 0) * (row.quantity || 0);
+        const name = row.products?.name || 'Produk';
+        sales += total;
+        cogs += cost;
+        unitsSold += row.quantity || 0;
+        if (!productMap[name]) productMap[name] = { name, qty: 0, sales: 0, cogs: 0, profit: 0 };
+        productMap[name].qty += row.quantity || 0;
+        productMap[name].sales += total;
+        productMap[name].cogs += cost;
+        productMap[name].profit += total - cost;
+      });
+
+    const expenses = (expData || []).reduce((sum, row) => sum + getExpenseTotal(row), 0);
+    const productionRows = (prodData || []).filter(row => !productFilter || row.product_id === productFilter);
+    const produced = productionRows.reduce((sum, row) => sum + (row.quantity || 0), 0);
+    const failed = productionRows.reduce((sum, row) => sum + (row.failed || 0), 0);
+    const consumed = productionRows.reduce((sum, row) => sum + (row.konsumsi || 0), 0);
+
+    setRangeReport({
+      sales,
+      cogs,
+      expenses,
+      profit: sales - cogs,
+      cashGap: sales - expenses,
+      produced,
+      failed,
+      consumed,
+      unitsSold,
+      topProducts: Object.values(productMap).sort((a, b) => b.sales - a.sales).slice(0, 6),
+    });
+    setRangeLoading(false);
+  };
+
   const generateDayText = () => {
     const dayName = DAY_NAMES[selectedDay.getDay()];
     let text = `${dayName}\n`;
@@ -217,10 +291,23 @@ export default function Laporan() {
   const handleExportExcel = async () => {
     const XLSX = await import('xlsx');
     const rows = activeTab === 'bulanan'
-      ? monthlyData.map(row => ({ Bulan: row.name, Penjualan: row.sales, Pengeluaran: row.expenses, Profit: row.profit, Margin: row.margin }))
-      : activeTab === 'harian'
-        ? dayReport.map(row => ({ Produk: row.name, Bawa: row.bawa, Gagal: row.gagal || 0, Terjual: row.terjual, Sisa: row.sisa ?? '', Total: row.total }))
-        : weekReport.flatMap(day => day.items.map(row => ({ Tanggal: format(day.day, 'yyyy-MM-dd'), Hari: day.dayName, Produk: row.name, Bawa: row.bawa, Gagal: row.gagal || 0, Terjual: row.terjual, Sisa: row.sisa ?? '', Total: row.total })));
+      ? monthlyData.map(row => ({ Bulan: row.name, Omzet: row.sales, HPP_Terjual: row.cogs, Laba_Produk: row.profit, Belanja_Bahan: row.expenses, Selisih_Kas_Bahan: row.cashGap, Margin: row.margin }))
+      : activeTab === 'rentang'
+        ? [
+            { Metrik: 'Omzet', Nilai: rangeReport.sales },
+            { Metrik: 'HPP terjual', Nilai: rangeReport.cogs },
+            { Metrik: 'Laba produk', Nilai: rangeReport.profit },
+            { Metrik: 'Belanja bahan', Nilai: rangeReport.expenses },
+            { Metrik: 'Selisih kas bahan', Nilai: rangeReport.cashGap },
+            { Metrik: 'Terjual', Nilai: rangeReport.unitsSold },
+            { Metrik: 'Produksi', Nilai: rangeReport.produced },
+            { Metrik: 'Gagal', Nilai: rangeReport.failed },
+            { Metrik: 'Konsumsi', Nilai: rangeReport.consumed },
+            ...rangeReport.topProducts.map(row => ({ Metrik: `Produk - ${row.name}`, Nilai: row.sales, Qty: row.qty, HPP: row.cogs, Laba_Produk: row.profit })),
+          ]
+        : activeTab === 'harian'
+          ? dayReport.map(row => ({ Produk: row.name, Bawa: row.bawa, Gagal: row.gagal || 0, Terjual: row.terjual, Sisa: row.sisa ?? '', Total: row.total }))
+          : weekReport.flatMap(day => day.items.map(row => ({ Tanggal: format(day.day, 'yyyy-MM-dd'), Hari: day.dayName, Produk: row.name, Bawa: row.bawa, Gagal: row.gagal || 0, Terjual: row.terjual, Sisa: row.sisa ?? '', Total: row.total })));
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Laporan');
@@ -235,7 +322,19 @@ export default function Laporan() {
       ? generateDayText()
       : activeTab === 'rekap'
         ? generateText()
-        : monthlyData.map(row => `${row.name}: penjualan Rp ${row.sales.toLocaleString('id-ID')}, pengeluaran Rp ${row.expenses.toLocaleString('id-ID')}, profit Rp ${row.profit.toLocaleString('id-ID')}`).join('\n');
+        : activeTab === 'rentang'
+          ? [
+              `Periode ${rangeStart} sampai ${rangeEnd}`,
+              `Omzet Rp ${rangeReport.sales.toLocaleString('id-ID')}`,
+              `HPP terjual Rp ${rangeReport.cogs.toLocaleString('id-ID')}`,
+              `Laba produk Rp ${rangeReport.profit.toLocaleString('id-ID')}`,
+              `Belanja bahan Rp ${rangeReport.expenses.toLocaleString('id-ID')}`,
+              `Selisih kas bahan Rp ${rangeReport.cashGap.toLocaleString('id-ID')}`,
+              `Terjual ${rangeReport.unitsSold} pcs, produksi ${rangeReport.produced} pcs, gagal ${rangeReport.failed} pcs, konsumsi ${rangeReport.consumed} pcs`,
+              '',
+              ...rangeReport.topProducts.map(row => `${row.name}: ${row.qty} pcs, omzet Rp ${row.sales.toLocaleString('id-ID')}`),
+            ].join('\n')
+          : monthlyData.map(row => `${row.name}: omzet Rp ${row.sales.toLocaleString('id-ID')}, HPP terjual Rp ${row.cogs.toLocaleString('id-ID')}, laba produk Rp ${row.profit.toLocaleString('id-ID')}, belanja bahan Rp ${row.expenses.toLocaleString('id-ID')}`).join('\n');
 
     doc.setFontSize(14);
     doc.text(title, 14, 16);
@@ -266,6 +365,7 @@ export default function Laporan() {
       <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-xl p-1 w-full sm:w-fit">
         {[
           { id: 'bulanan', label: 'Bulanan',         icon: BarChart2 },
+          { id: 'rentang', label: 'Rentang',         icon: Calendar  },
           { id: 'harian',  label: 'Rekap Harian',    icon: Calendar  },
           { id: 'rekap',   label: 'Rekap Mingguan',  icon: Calendar  },
         ].map(({ id, label, icon: Icon }) => (
@@ -310,14 +410,14 @@ export default function Laporan() {
         <div className="flex gap-2">
           <button
             onClick={handleExportExcel}
-            disabled={activeTab === 'bulanan' ? monthlyData.length === 0 : activeTab === 'harian' ? dayReport.length === 0 : weekReport.every(d => !d.hasData)}
+            disabled={activeTab === 'bulanan' ? monthlyData.length === 0 : activeTab === 'rentang' ? rangeReport.sales === 0 && rangeReport.expenses === 0 && rangeReport.produced === 0 : activeTab === 'harian' ? dayReport.length === 0 : weekReport.every(d => !d.hasData)}
             className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
           >
             <FileSpreadsheet size={16} /> Excel
           </button>
           <button
             onClick={handleExportPDF}
-            disabled={activeTab === 'bulanan' ? monthlyData.length === 0 : activeTab === 'harian' ? dayReport.length === 0 : weekReport.every(d => !d.hasData)}
+            disabled={activeTab === 'bulanan' ? monthlyData.length === 0 : activeTab === 'rentang' ? rangeReport.sales === 0 && rangeReport.expenses === 0 && rangeReport.produced === 0 : activeTab === 'harian' ? dayReport.length === 0 : weekReport.every(d => !d.hasData)}
             className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
           >
             <FileText size={16} /> PDF
@@ -330,9 +430,9 @@ export default function Laporan() {
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {[
-              { label: 'Untung Bulan Ini',        value: `Rp ${stats.profitThisMonth.toLocaleString('id-ID')}`,  sub: `${getProfitChange() >= 0 ? '+' : ''}${getProfitChange().toFixed(1)}% dari bulan lalu`, color: getProfitChange() >= 0 ? 'text-emerald-500' : 'text-red-500' },
+              { label: 'Laba Produk Bulan Ini',   value: `Rp ${stats.profitThisMonth.toLocaleString('id-ID')}`,  sub: `${getProfitChange() >= 0 ? '+' : ''}${getProfitChange().toFixed(1)}% dari bulan lalu`, color: getProfitChange() >= 0 ? 'text-emerald-500' : 'text-red-500' },
               { label: 'Margin Rata-rata',         value: `${stats.averageMargin.toFixed(1)}%`,                   sub: stats.averageMargin >= 40 ? 'Sangat Sehat' : stats.averageMargin >= 20 ? 'Cukup Sehat' : 'Perlu Evaluasi Harga', color: stats.averageMargin >= 40 ? 'text-emerald-500' : stats.averageMargin >= 20 ? 'text-amber-500' : 'text-red-500' },
-              { label: `Total Penjualan ${year}`,  value: `Rp ${stats.totalSalesYear.toLocaleString('id-ID')}`,   sub: `1 Jan – 31 Des ${year}`, color: 'text-gray-400' },
+              { label: `Total Omzet ${year}`,      value: `Rp ${stats.totalSalesYear.toLocaleString('id-ID')}`,   sub: `1 Jan – 31 Des ${year}`, color: 'text-gray-400' },
             ].map(card => (
               <div key={card.label} className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
                 <h3 className="text-gray-500 dark:text-gray-400 font-medium text-sm mb-1">{card.label}</h3>
@@ -348,7 +448,7 @@ export default function Laporan() {
 
           <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-800">
             <div className="flex items-center justify-between mb-8">
-              <h2 className="text-lg font-bold text-gray-900 dark:text-white">Grafik Keuntungan Bulanan</h2>
+              <h2 className="text-lg font-bold text-gray-900 dark:text-white">Grafik Laba Produk Bulanan</h2>
               <div className="flex items-center gap-1">
                 <button onClick={() => setYear(y => y - 1)} className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500"><ChevronLeft size={18} /></button>
                 <span className="text-sm font-semibold text-gray-700 dark:text-gray-200 w-12 text-center">{year}</span>
@@ -366,7 +466,7 @@ export default function Laporan() {
                     <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#6b7280' }} tickFormatter={v => `Rp ${v / 1000000}M`} />
                     <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} formatter={v => [`Rp ${v.toLocaleString('id-ID')}`, undefined]} />
                     <Legend verticalAlign="top" height={36} iconType="circle" />
-                    <Bar dataKey="profit" name="Untung Bersih" fill="#14b8a6" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="profit" name="Laba Produk" fill="#14b8a6" radius={[6, 6, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               )}
@@ -376,6 +476,78 @@ export default function Laporan() {
       )}
 
       {/* ── TAB REKAP HARIAN ── */}
+      {activeTab === 'rentang' && (
+        <div className="space-y-4">
+          <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 p-4">
+            <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Dari tanggal</label>
+                <input type="date" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Sampai tanggal</label>
+                <input type="date" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none focus:border-primary-500" />
+              </div>
+              <button type="button" onClick={() => { setRangeStart(dateToInputValue(startOfWeek(new Date(), { weekStartsOn: 1 }))); setRangeEnd(dateToInputValue(new Date())); }} className="px-4 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-primary-600 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+                Minggu ini
+              </button>
+            </div>
+          </div>
+
+          {rangeLoading ? (
+            <div className="flex justify-center py-16"><Loader2 className="animate-spin text-primary-500" size={32} /></div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
+                {[
+                  { label: 'Omzet', value: `Rp ${rangeReport.sales.toLocaleString('id-ID')}`, sub: `${rangeReport.unitsSold} pcs terjual`, color: 'text-gray-900 dark:text-white' },
+                  { label: 'HPP Terjual', value: `Rp ${rangeReport.cogs.toLocaleString('id-ID')}`, sub: 'Modal produk terjual', color: 'text-amber-600 dark:text-amber-400' },
+                  { label: 'Laba Produk', value: `Rp ${rangeReport.profit.toLocaleString('id-ID')}`, sub: 'Omzet - HPP terjual', color: rangeReport.profit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400' },
+                  { label: 'Belanja Bahan', value: `Rp ${rangeReport.expenses.toLocaleString('id-ID')}`, sub: 'Pembelian stok bahan', color: 'text-blue-600 dark:text-blue-400' },
+                  { label: 'Selisih Kas Bahan', value: `Rp ${rangeReport.cashGap.toLocaleString('id-ID')}`, sub: 'Omzet - belanja bahan', color: rangeReport.cashGap >= 0 ? 'text-violet-600 dark:text-violet-400' : 'text-orange-600 dark:text-orange-400' },
+                ].map(card => (
+                  <div key={card.label} className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
+                    <p className="text-sm text-gray-500 dark:text-gray-400">{card.label}</p>
+                    <p className={`mt-2 text-xl font-bold ${card.color}`}>{card.value}</p>
+                    <p className="text-xs text-gray-400 mt-1">{card.sub}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
+                  <h2 className="text-sm font-bold text-gray-900 dark:text-white mb-3">Produksi & Kehilangan</h2>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between"><span className="text-gray-500">Produksi</span><span className="font-semibold">{rangeReport.produced} pcs</span></div>
+                    <div className="flex justify-between"><span className="text-gray-500">Gagal</span><span className="font-semibold text-red-500">{rangeReport.failed} pcs</span></div>
+                    <div className="flex justify-between"><span className="text-gray-500">Konsumsi sendiri</span><span className="font-semibold text-orange-500">{rangeReport.consumed} pcs</span></div>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-2 bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-800">
+                  <h2 className="text-sm font-bold text-gray-900 dark:text-white mb-3">Produk Teratas di Rentang Ini</h2>
+                  {rangeReport.topProducts.length === 0 ? (
+                    <p className="text-sm text-gray-500">Belum ada penjualan pada rentang ini.</p>
+                  ) : (
+                    <div className="divide-y divide-gray-100 dark:divide-gray-800">
+                      {rangeReport.topProducts.map(row => (
+                        <div key={row.name} className="py-2.5 flex items-center justify-between gap-3 text-sm">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-gray-900 dark:text-white truncate">{row.name}</p>
+                            <p className="text-xs text-gray-500">{row.qty} pcs, HPP Rp {row.cogs.toLocaleString('id-ID')}, laba Rp {row.profit.toLocaleString('id-ID')}</p>
+                          </div>
+                          <p className="font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">Rp {row.sales.toLocaleString('id-ID')}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {activeTab === 'harian' && (
         <div className="space-y-4">
           {/* Navigator hari */}

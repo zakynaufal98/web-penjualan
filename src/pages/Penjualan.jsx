@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
-import { Search, Plus, Edit2, Trash2, X, Loader2, AlertCircle, Package, Check, ShoppingCart } from 'lucide-react';
+import { Search, Plus, Edit2, Trash2, X, Loader2, AlertCircle, Package, Check, ShoppingCart, Printer } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
@@ -12,6 +12,7 @@ import {
   todayInputValue,
 } from '../lib/dateUtils';
 import { reconcileProductStock } from '../lib/productStock';
+import { addActivity } from '../lib/activityLog';
 
 const ProductPicker = ({ products, value, onChange }) => {
   const selected = products.find(p => p.id === value);
@@ -158,7 +159,7 @@ const CustomerNameInput = ({ value, onChange, suggestions }) => {
   );
 };
 
-const isInPeriod = (dateValue, period) => {
+const isInPeriod = (dateValue, period, startDate, endDate) => {
   if (period === 'all') return true;
   const date = new Date(dateValue);
   const now = new Date();
@@ -177,12 +178,23 @@ const isInPeriod = (dateValue, period) => {
     start.setHours(0, 0, 0, 0);
     return date >= start;
   }
+  if (period === 'custom') {
+    if (startDate) {
+      const from = new Date(`${startDate}T00:00:00`);
+      if (date < from) return false;
+    }
+    if (endDate) {
+      const to = new Date(`${endDate}T23:59:59`);
+      if (date > to) return false;
+    }
+    return true;
+  }
   return true;
 };
 
 export default function Penjualan() {
   const [searchTerm, setSearchTerm] = useState('');
-  const [filters, setFilters] = useState({ period: 'all', productId: '', payment: '', customer: '' });
+  const [filters, setFilters] = useState({ period: 'all', productId: '', payment: '', customer: '', startDate: '', endDate: '' });
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [transactions, setTransactions] = useState([]);
@@ -211,9 +223,17 @@ export default function Penjualan() {
   const selectedProduct = products.find(p => p.id === formData.product_id);
   const previewQty = parseInt(formData.quantity) || 0;
   const previewTotal = selectedProduct ? selectedProduct.selling_price * previewQty : 0;
+  const editStockCredit = editingTransaction && editingTransaction.product_id === formData.product_id ? editingTransaction.quantity : 0;
+  const availableForForm = selectedProduct ? (selectedProduct.stock || 0) + editStockCredit : 0;
+  const formStockWarning = selectedProduct && previewQty > availableForForm
+    ? `Stok ${selectedProduct.name} hanya ${availableForForm} pcs. Kurangi qty sebelum menyimpan.`
+    : '';
   const selectedQuickProduct = products.find(p => p.id === quickSale.product_id);
   const quickSaleQty = parseInt(quickSale.quantity) || 0;
   const quickSaleTotal = selectedQuickProduct ? selectedQuickProduct.selling_price * quickSaleQty : 0;
+  const quickSaleWarning = selectedQuickProduct && quickSaleQty > (selectedQuickProduct.stock || 0)
+    ? `Stok hanya ${selectedQuickProduct.stock || 0} pcs.`
+    : '';
   const customerSuggestions = useMemo(() => (
     [...new Set(transactions.map(t => t.customer_name).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b))
@@ -224,7 +244,7 @@ export default function Penjualan() {
       || t.products?.name?.toLowerCase().includes(q)
       || t.customer_name?.toLowerCase().includes(q)
       || t.payment_method?.toLowerCase().includes(q);
-    const matchesPeriod = isInPeriod(t.transaction_date, filters.period);
+    const matchesPeriod = isInPeriod(t.transaction_date, filters.period, filters.startDate, filters.endDate);
     const matchesProduct = !filters.productId || t.product_id === filters.productId;
     const matchesPayment = !filters.payment || t.payment_method === filters.payment;
     const matchesCustomer = !filters.customer || t.customer_name === filters.customer;
@@ -381,6 +401,11 @@ export default function Penjualan() {
         await reconcileProductStock(editingTransaction.product_id);
       }
       await reconcileProductStock(formData.product_id);
+      addActivity({
+        type: 'sales',
+        title: editingTransaction ? 'Transaksi penjualan diperbarui' : 'Penjualan baru dicatat',
+        description: `${freshProduct.name} ${newQty} pcs, ${formData.payment_method}${formData.customer_name ? ` untuk ${formData.customer_name}` : ''}.`,
+      });
       // INSERT: trigger tr_reduce_stock otomatis mengurangi stok — tidak perlu manual
       setIsModalOpen(false);
       setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue(), transaction_time: currentTimeInputValue() });
@@ -396,6 +421,10 @@ export default function Penjualan() {
     setError('');
     if (!quickSale.product_id || quickSaleQty <= 0) {
       setToast({ message: 'Pilih produk dan isi jumlah penjualan.', type: 'error' });
+      return;
+    }
+    if (quickSaleWarning) {
+      setToast({ message: quickSaleWarning, type: 'error' });
       return;
     }
 
@@ -431,6 +460,11 @@ export default function Penjualan() {
       setToast({ message: friendlyError(insertError), type: 'error' });
     } else {
       await reconcileProductStock(quickSale.product_id);
+      addActivity({
+        type: 'sales',
+        title: 'Penjualan cepat dicatat',
+        description: `${freshProduct.name} ${quickSaleQty} pcs, ${quickSale.payment_method}.`,
+      });
       setQuickSale({ product_id: '', quantity: 1, payment_method: quickSale.payment_method });
       setToast({ message: 'Penjualan cepat berhasil dicatat.', type: 'success' });
       fetchTransactions();
@@ -456,9 +490,51 @@ export default function Penjualan() {
         }
       }
       setToast({ message: 'Transaksi berhasil dihapus.', type: 'success' });
+      addActivity({
+        type: 'sales',
+        title: 'Transaksi penjualan dihapus',
+        description: trxToDelete ? `${trxToDelete.products?.name || 'Produk'} ${trxToDelete.quantity} pcs.` : undefined,
+      });
       fetchTransactions();
       fetchProducts();
     }
+  };
+
+  const handlePrintReceipt = (trx) => {
+    const total = trx.total_price || (trx.unit_price || 0) * (trx.quantity || 0);
+    const receipt = `
+      <html>
+        <head>
+          <title>Struk Penjualan</title>
+          <style>
+            body { font-family: Arial, sans-serif; width: 280px; padding: 16px; color: #111827; }
+            h1 { font-size: 16px; margin: 0 0 12px; }
+            .row { display: flex; justify-content: space-between; gap: 12px; margin: 8px 0; font-size: 13px; }
+            .total { border-top: 1px solid #e5e7eb; padding-top: 10px; margin-top: 10px; font-weight: 700; }
+            .muted { color: #6b7280; font-size: 12px; }
+          </style>
+        </head>
+        <body>
+          <h1>Struk Penjualan</h1>
+          <p class="muted">${new Date(trx.transaction_date).toLocaleString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>
+          <div class="row"><span>Produk</span><strong>${trx.products?.name || 'Produk'}</strong></div>
+          <div class="row"><span>Qty</span><strong>${trx.quantity} pcs</strong></div>
+          <div class="row"><span>Harga</span><strong>Rp ${(trx.unit_price || 0).toLocaleString('id-ID')}</strong></div>
+          <div class="row"><span>Bayar</span><strong>${trx.payment_method}</strong></div>
+          <div class="row"><span>Pelanggan</span><strong>${trx.customer_name || '-'}</strong></div>
+          <div class="row total"><span>Total</span><strong>Rp ${total.toLocaleString('id-ID')}</strong></div>
+        </body>
+      </html>
+    `;
+    const win = window.open('', '_blank', 'width=360,height=560');
+    if (!win) {
+      setToast({ message: 'Popup browser diblokir. Izinkan popup untuk mencetak struk.', type: 'error' });
+      return;
+    }
+    win.document.write(receipt);
+    win.document.close();
+    win.focus();
+    win.print();
   };
 
   return (
@@ -513,7 +589,7 @@ export default function Penjualan() {
           </div>
           <button
             type="submit"
-            disabled={quickSaleLoading}
+            disabled={quickSaleLoading || Boolean(quickSaleWarning)}
             className="w-full lg:w-auto flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors disabled:opacity-70"
           >
             {quickSaleLoading ? <Loader2 className="animate-spin" size={16} /> : <Plus size={16} />}
@@ -529,9 +605,14 @@ export default function Penjualan() {
               Total: <span className="font-semibold">Rp {quickSaleTotal.toLocaleString('id-ID')}</span>
             </div>
             <div className="hidden sm:block rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-500">
-              Sisa setelah jual: <span className="font-semibold">{Math.max(0, selectedQuickProduct.stock - quickSaleQty)} pcs</span>
+              Sisa setelah jual: <span className={`font-semibold ${quickSaleWarning ? 'text-red-500' : ''}`}>{Math.max(0, selectedQuickProduct.stock - quickSaleQty)} pcs</span>
             </div>
           </div>
+        )}
+        {quickSaleWarning && (
+          <p className="mt-2 text-xs font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 px-3 py-2 rounded-lg">
+            {quickSaleWarning}
+          </p>
         )}
       </form>
 
@@ -553,6 +634,7 @@ export default function Penjualan() {
               <option value="today">Hari ini</option>
               <option value="week">7 hari</option>
               <option value="month">Bulan ini</option>
+              <option value="custom">Rentang</option>
             </select>
             <select value={filters.productId} onChange={(e) => setFilters({ ...filters, productId: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
               <option value="">Semua produk</option>
@@ -566,10 +648,26 @@ export default function Penjualan() {
               <option value="">Semua pelanggan</option>
               {customerSuggestions.map(name => <option key={name} value={name}>{name}</option>)}
             </select>
-            <button type="button" onClick={() => { setSearchTerm(''); setFilters({ period: 'all', productId: '', payment: '', customer: '' }); setPage(1); }} className="px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-primary-600 hover:bg-white dark:hover:bg-gray-900 transition-colors">
+            <button type="button" onClick={() => { setSearchTerm(''); setFilters({ period: 'all', productId: '', payment: '', customer: '', startDate: '', endDate: '' }); setPage(1); }} className="px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-primary-600 hover:bg-white dark:hover:bg-gray-900 transition-colors">
               Reset
             </button>
           </div>
+          {filters.period === 'custom' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input
+                type="date"
+                value={filters.startDate}
+                onChange={(e) => setFilters({ ...filters, startDate: e.target.value })}
+                className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none"
+              />
+              <input
+                type="date"
+                value={filters.endDate}
+                onChange={(e) => setFilters({ ...filters, endDate: e.target.value })}
+                className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none"
+              />
+            </div>
+          )}
         </div>
 
         <div className="overflow-x-auto">
@@ -633,6 +731,9 @@ export default function Penjualan() {
                       <div className="flex gap-1">
                         <button onClick={() => openEdit(trx)} className="p-2 text-gray-400 hover:text-primary-600 hover:bg-primary-50 dark:hover:bg-primary-900/20 rounded-lg transition-colors">
                           <Edit2 size={16} />
+                        </button>
+                        <button onClick={() => handlePrintReceipt(trx)} className="p-2 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded-lg transition-colors" title="Cetak struk">
+                          <Printer size={16} />
                         </button>
                         <button onClick={() => handleDelete(trx.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors">
                           <Trash2 size={16} />
@@ -738,6 +839,11 @@ export default function Penjualan() {
                     </div>
                   </div>
                 )}
+                {formStockWarning && (
+                  <p className="mt-2 text-xs font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 px-3 py-2 rounded-lg">
+                    {formStockWarning}
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -776,7 +882,7 @@ export default function Penjualan() {
 
               <div className="pt-2">
                 <button 
-                  type="submit" disabled={formLoading}
+                  type="submit" disabled={formLoading || Boolean(formStockWarning)}
                   className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2.5 rounded-xl text-sm font-medium transition-colors shadow-sm disabled:opacity-70"
                 >
                   {formLoading ? <Loader2 className="animate-spin" size={18} /> : (editingTransaction ? 'Simpan Perubahan' : 'Simpan Transaksi')}

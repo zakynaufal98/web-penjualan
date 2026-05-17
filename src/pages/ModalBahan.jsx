@@ -13,6 +13,8 @@ export default function ModalBahan() {
   const [activeTab, setActiveTab] = useState('riwayat');
   const [searchTerm, setSearchTerm] = useState('');
   const [historyFilters, setHistoryFilters] = useState({ period: 'all', category: '', supplier: '' });
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyPageSize, setHistoryPageSize] = useState(10);
   const [ingredients, setIngredients] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -58,8 +60,19 @@ export default function ModalBahan() {
   const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null });
   const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
   const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
+  const isMeasuredUnit = (unit) => ['kg', 'gr', 'liter', 'ml'].includes(unit);
   const getItemTotal = (item) =>
-    ['gr', 'ml'].includes(item.unit) ? item.unit_price : item.quantity * item.unit_price;
+    isMeasuredUnit(item.unit) ? item.unit_price : item.quantity * item.unit_price;
+  const getMeasuredBaseUnit = (unit) => (unit === 'kg' || unit === 'gr' ? 'gr' : 'ml');
+  const getMeasuredBaseQuantity = (item) => {
+    if (item.unit === 'kg' || item.unit === 'liter') return (parseFloat(item.quantity) || 0) * 1000;
+    if (item.unit === 'gr' || item.unit === 'ml') return parseFloat(item.quantity) || 0;
+    return 0;
+  };
+  const getMeasuredPricePerBase = (item) => {
+    const baseQty = getMeasuredBaseQuantity(item);
+    return baseQty > 0 ? (parseFloat(item.unit_price) || 0) / baseQty : 0;
+  };
   const cartTotal = cart.reduce((sum, item) => sum + getItemTotal(item), 0);
   const ingredientSuggestions = useMemo(() => {
     const q = currentItem.name.trim().toLowerCase();
@@ -103,10 +116,17 @@ export default function ModalBahan() {
     const matchesSupplier = !historyFilters.supplier || (item.supplier || 'Tanpa Supplier') === historyFilters.supplier;
     return matchesSearch && matchesPeriod && matchesCategory && matchesSupplier;
   }), [ingredients, searchTerm, historyFilters]);
+  const historyTotalPages = Math.max(1, Math.ceil(filteredIngredients.length / historyPageSize));
+  const currentHistoryPage = Math.min(historyPage, historyTotalPages);
+  const paginatedIngredients = filteredIngredients.slice((currentHistoryPage - 1) * historyPageSize, currentHistoryPage * historyPageSize);
 
   useEffect(() => {
     fetchIngredients();
   }, []);
+
+  useEffect(() => {
+    setHistoryPage(1);
+  }, [searchTerm, historyFilters, historyPageSize]);
 
   const fetchIngredients = async () => {
     setLoading(true);
@@ -128,6 +148,21 @@ export default function ModalBahan() {
     const w = parseFloat(weight);
     if (!w) return '';
     return isNaN(c) ? w : c * w;
+  };
+
+  const formatQty = (value) => {
+    const n = parseFloat(value);
+    if (isNaN(n)) return value;
+    return Number.isInteger(n)
+      ? n.toLocaleString('id-ID')
+      : parseFloat(n.toFixed(4)).toLocaleString('id-ID');
+  };
+
+  const getPackageInfo = (item) => {
+    const computed = computeItemsPerUnit(item.content_count, item.content_weight);
+    const itemsPerUnit = computed || item.items_per_unit;
+    const totalBase = itemsPerUnit ? parseFloat(itemsPerUnit) * (parseFloat(item.quantity) || 0) : 0;
+    return { itemsPerUnit: parseFloat(itemsPerUnit) || 0, totalBase };
   };
 
   const handleAddToCart = (e) => {
@@ -369,8 +404,8 @@ export default function ModalBahan() {
     if (ing.items_per_unit && ing.base_unit) {
       return { price: ing.unit_price / ing.items_per_unit, unit: ing.base_unit };
     }
-    if (ing.unit === 'kg')    return { price: ing.unit_price / 1000, unit: 'gr' };
-    if (ing.unit === 'liter') return { price: ing.unit_price / 1000, unit: 'ml' };
+    if (ing.unit === 'kg')    return { price: ing.quantity > 0 ? ing.unit_price / (ing.quantity * 1000) : 0, unit: 'gr' };
+    if (ing.unit === 'liter') return { price: ing.quantity > 0 ? ing.unit_price / (ing.quantity * 1000) : 0, unit: 'ml' };
     if (ing.unit === 'gr' || ing.unit === 'ml') return { price: ing.unit_price / ing.quantity, unit: ing.unit };
     return { price: ing.unit_price, unit: ing.unit };
   };
@@ -543,7 +578,7 @@ export default function ModalBahan() {
                 <th className="p-4 font-medium">Kategori</th>
                 <th className="p-4 font-medium">Supplier</th>
                 <th className="p-4 font-medium text-right">Jumlah</th>
-                <th className="p-4 font-medium text-right">Harga Satuan</th>
+                <th className="p-4 font-medium text-right">Harga</th>
                 <th className="p-4 font-medium text-right">Total</th>
                 <th className="p-4 font-medium">Aksi</th>
               </tr>
@@ -571,7 +606,7 @@ export default function ModalBahan() {
                   <td colSpan="8" className="p-8 text-center text-gray-500">Tidak ada pembelian yang cocok dengan filter.</td>
                 </tr>
               ) : (
-                filteredIngredients.map((item) => (
+                paginatedIngredients.map((item) => (
                   <tr key={item.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">{new Date(item.purchase_date).toLocaleDateString('id-ID')}</td>
                     <td className="p-4 font-medium text-gray-900 dark:text-gray-100 whitespace-nowrap">{item.name}</td>
@@ -581,15 +616,26 @@ export default function ModalBahan() {
                       </span>
                     </td>
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">{item.supplier || '-'}</td>
-                    <td className="p-4 text-right text-gray-900 dark:text-gray-100 whitespace-nowrap">{item.quantity} {item.unit}</td>
+                    <td className="p-4 text-right text-gray-900 dark:text-gray-100 whitespace-nowrap">
+                      {item.quantity} {item.unit}
+                      {item.items_per_unit && item.base_unit && (
+                        <span className="block text-xs text-gray-400">
+                          1 {item.unit} = {formatQty(item.items_per_unit)} {item.base_unit}
+                          <br />
+                          total {formatQty(item.quantity * item.items_per_unit)} {item.base_unit}
+                        </span>
+                      )}
+                    </td>
                     <td className="p-4 text-right text-gray-500 dark:text-gray-400 whitespace-nowrap">
                       Rp {item.unit_price.toLocaleString('id-ID')}
-                      {['gr','ml'].includes(item.unit) && (
-                        <span className="block text-xs text-gray-400">(total beli)</span>
+                      {isMeasuredUnit(item.unit) && (
+                        <span className="block text-xs text-gray-400">
+                          total beli, Rp {getMeasuredPricePerBase(item).toFixed(1)}/{getMeasuredBaseUnit(item.unit)}
+                        </span>
                       )}
                     </td>
                     <td className="p-4 text-right font-medium text-red-600 dark:text-red-400 whitespace-nowrap">
-                      Rp {(['gr','ml'].includes(item.unit) ? item.unit_price : item.quantity * item.unit_price).toLocaleString('id-ID')}
+                      Rp {getItemTotal(item).toLocaleString('id-ID')}
                     </td>
                     <td className="p-4 flex items-center gap-1">
                       {item.receipt_url && (
@@ -610,6 +656,41 @@ export default function ModalBahan() {
             </tbody>
           </table>
         </div>
+        {filteredIngredients.length > 0 && (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 border-t border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/40">
+            <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              <span>
+                Menampilkan {(currentHistoryPage - 1) * historyPageSize + 1}-{Math.min(currentHistoryPage * historyPageSize, filteredIngredients.length)} dari {filteredIngredients.length} pembelian
+              </span>
+              <select
+                value={historyPageSize}
+                onChange={(e) => setHistoryPageSize(parseInt(e.target.value))}
+                className="px-2 py-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-xs outline-none"
+              >
+                {[10, 25, 50].map(size => <option key={size} value={size}>{size}/hal</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setHistoryPage(p => Math.max(1, p - 1))}
+                disabled={currentHistoryPage <= 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-white dark:hover:bg-gray-900 transition-colors"
+              >
+                Sebelumnya
+              </button>
+              <span className="text-xs text-gray-500 dark:text-gray-400">Hal {currentHistoryPage}/{historyTotalPages}</span>
+              <button
+                type="button"
+                onClick={() => setHistoryPage(p => Math.min(historyTotalPages, p + 1))}
+                disabled={currentHistoryPage >= historyTotalPages}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-white dark:hover:bg-gray-900 transition-colors"
+              >
+                Berikutnya
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       )} {/* end tab riwayat */}
 
@@ -927,7 +1008,7 @@ export default function ModalBahan() {
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jumlah</label>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jumlah Dibeli</label>
                       <div className="flex">
                         <input 
                           type="number" min="0.1" step="0.1" required
@@ -959,25 +1040,35 @@ export default function ModalBahan() {
                           <option value="pack">pack</option>
                         </select>
                       </div>
+                      {!['kg', 'gr', 'liter', 'ml'].includes(currentItem.unit) && (
+                        <p className="mt-1 text-xs text-gray-400">
+                          Contoh: beli 6 pack, isi jumlah 6 dan unit pack.
+                        </p>
+                      )}
+                      {isMeasuredUnit(currentItem.unit) && (
+                        <p className="mt-1 text-xs text-gray-400">
+                          Contoh: beli 500 gr harga 43.000, isi jumlah 500 gr dan total harga beli 43.000.
+                        </p>
+                      )}
 
                       {/* Field isi per kemasan — muncul untuk satuan non-dasar */}
                       {!['kg', 'gr', 'liter', 'ml'].includes(currentItem.unit) && (
                         <div className="mt-2 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg space-y-2">
                           <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
-                            Isi per {currentItem.unit} <span className="font-normal">(opsional, untuk kalkulasi HPP)</span>
+                            Isi 1 {currentItem.unit} <span className="font-normal">(untuk stok gram/ml dan HPP)</span>
                           </p>
                           <div className="flex items-center gap-2 flex-wrap">
                             <input
                               type="number" min="1" step="1"
-                              placeholder="jml isi"
+                              placeholder="isi kecil"
                               value={currentItem.content_count}
                               onChange={(e) => setCurrentItem({ ...currentItem, content_count: e.target.value })}
                               className="w-20 px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs focus:border-primary-500 outline-none"
                             />
                             <span className="text-xs text-amber-600 dark:text-amber-400">×</span>
                             <input
-                              type="number" min="0.1" step="0.1"
-                              placeholder="berat/vol"
+                              type="number" min="0.1" step="any"
+                              placeholder="isi per kecil"
                               value={currentItem.content_weight}
                               onChange={(e) => setCurrentItem({ ...currentItem, content_weight: e.target.value })}
                               className="w-24 px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs focus:border-primary-500 outline-none"
@@ -998,15 +1089,24 @@ export default function ModalBahan() {
                               </span>
                             )}
                           </div>
+                          {currentItem.content_weight && (() => {
+                            const info = getPackageInfo(currentItem);
+                            return (
+                              <div className="rounded-lg bg-white/70 dark:bg-gray-900/60 px-3 py-2 text-xs text-amber-700 dark:text-amber-300 space-y-0.5">
+                                <p>1 {currentItem.unit} = {currentItem.content_count ? `${formatQty(currentItem.content_count)} x ` : ''}{formatQty(currentItem.content_weight)} {currentItem.base_unit} = <span className="font-semibold">{formatQty(info.itemsPerUnit)} {currentItem.base_unit}</span></p>
+                                <p>{formatQty(currentItem.quantity)} {currentItem.unit} masuk stok = <span className="font-semibold">{formatQty(info.totalBase)} {currentItem.base_unit}</span></p>
+                              </div>
+                            );
+                          })()}
                           <p className="text-xs text-amber-600 dark:text-amber-500">
-                            Cth: My Vla → 6 × 60 gr &nbsp;|&nbsp; Susu UHT → × 1000 ml &nbsp;|&nbsp; Cup → × 100 pcs &nbsp;|&nbsp; Stiker → × 96 pcs
+                            Cth benar: beli 6 pack vla isi 60 gr/pack → jumlah 6 pack, isi per pack 1 × 60 gr. Jangan isi 6 × 60 gr, karena itu berarti 1 pack = 360 gr.
                           </p>
                         </div>
                       )}
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                        {['gr','ml'].includes(currentItem.unit) ? 'Total Harga Beli' : 'Harga Satuan'}
+                        {isMeasuredUnit(currentItem.unit) ? 'Total Harga Beli' : 'Harga Satuan'}
                       </label>
                       <input
                         type="text" required placeholder="12.000"
@@ -1029,9 +1129,9 @@ export default function ModalBahan() {
                             : '?'}/{currentItem.base_unit}
                         </p>
                       )}
-                      {['gr','ml'].includes(currentItem.unit) && currentItem.unit_price > 0 && currentItem.quantity > 0 && (
+                      {isMeasuredUnit(currentItem.unit) && currentItem.unit_price > 0 && getMeasuredBaseQuantity(currentItem) > 0 && (
                         <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
-                          = Rp {(currentItem.unit_price / currentItem.quantity).toFixed(1)}/{currentItem.unit} untuk HPP
+                          = Rp {getMeasuredPricePerBase(currentItem).toFixed(1)}/{getMeasuredBaseUnit(currentItem.unit)} untuk HPP
                         </p>
                       )}
                     </div>
@@ -1067,13 +1167,23 @@ export default function ModalBahan() {
                             <td className="p-3">
                               <div className="font-medium text-gray-900 dark:text-gray-100">{item.name}</div>
                               <div className="text-xs text-gray-500">
-                                Rp {item.unit_price.toLocaleString('id-ID')} / {item.unit}
+                                Rp {item.unit_price.toLocaleString('id-ID')}{isMeasuredUnit(item.unit) ? ' total beli' : ` / ${item.unit}`}
                                 {item.items_per_unit
                                   ? ` · ${item.content_count ? `${item.content_count}×${item.content_weight}` : item.items_per_unit}${item.base_unit}/${item.unit}`
                                   : ''}
+                                {isMeasuredUnit(item.unit)
+                                  ? ` · Rp ${getMeasuredPricePerBase(item).toFixed(1)}/${getMeasuredBaseUnit(item.unit)}`
+                                  : ''}
                               </div>
                             </td>
-                            <td className="p-3 text-right text-gray-700 dark:text-gray-300">{item.quantity} {item.unit}</td>
+                            <td className="p-3 text-right text-gray-700 dark:text-gray-300">
+                              {item.quantity} {item.unit}
+                              {item.items_per_unit && (
+                                <span className="block text-xs text-gray-400">
+                                  total {formatQty(item.quantity * item.items_per_unit)} {item.base_unit}
+                                </span>
+                              )}
+                            </td>
                             <td className="p-3 text-right font-medium text-gray-900 dark:text-gray-100">Rp {getItemTotal(item).toLocaleString('id-ID')}</td>
                             <td className="p-3 text-right">
                               <button onClick={() => removeFromCart(item.id)} className="text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 p-1.5 rounded-md">
@@ -1155,7 +1265,7 @@ export default function ModalBahan() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jumlah</label>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Jumlah Dibeli</label>
                   <div className="flex">
                     <input type="number" min="0.1" step="0.1" required value={editFormData.quantity}
                       onChange={(e) => setEditFormData({...editFormData, quantity: e.target.value === '' ? '' : parseFloat(e.target.value)})}
@@ -1175,10 +1285,15 @@ export default function ModalBahan() {
                       <option value="pack">pack</option>
                     </select>
                   </div>
+                  {isMeasuredUnit(editFormData.unit) && (
+                    <p className="mt-1 text-xs text-gray-400">
+                      Untuk kg/gr/liter/ml, harga di samping adalah total harga beli.
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                    {['gr','ml'].includes(editFormData.unit) ? 'Total Harga Beli' : 'Harga Satuan'}
+                    {isMeasuredUnit(editFormData.unit) ? 'Total Harga Beli' : 'Harga Satuan'}
                   </label>
                   <input type="text" required
                     value={editFormData.unit_price !== '' ? Number(editFormData.unit_price).toLocaleString('id-ID') : ''}
@@ -1188,9 +1303,9 @@ export default function ModalBahan() {
                       else if (/^\d+$/.test(raw)) setEditFormData({...editFormData, unit_price: parseInt(raw)});
                     }}
                     className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none" />
-                  {['gr','ml'].includes(editFormData.unit) && editFormData.unit_price > 0 && editFormData.quantity > 0 && (
+                  {isMeasuredUnit(editFormData.unit) && editFormData.unit_price > 0 && getMeasuredBaseQuantity(editFormData) > 0 && (
                     <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
-                      = Rp {(editFormData.unit_price / editFormData.quantity).toFixed(1)}/{editFormData.unit} untuk HPP
+                      = Rp {getMeasuredPricePerBase(editFormData).toFixed(1)}/{getMeasuredBaseUnit(editFormData.unit)} untuk HPP
                     </p>
                   )}
                 </div>
@@ -1199,14 +1314,14 @@ export default function ModalBahan() {
               {!['kg', 'gr', 'liter', 'ml'].includes(editFormData.unit) && (
                 <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl space-y-2">
                   <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
-                    Isi per {editFormData.unit} <span className="font-normal">(opsional, untuk kalkulasi HPP)</span>
+                    Isi 1 {editFormData.unit} <span className="font-normal">(untuk stok gram/ml dan HPP)</span>
                   </p>
                   <div className="flex items-center gap-2 flex-wrap">
                     <input type="number" min="1" step="1" placeholder="jml isi" value={editFormData.content_count}
                       onChange={(e) => setEditFormData({...editFormData, content_count: e.target.value})}
                       className="w-20 px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs focus:border-primary-500 outline-none" />
                     <span className="text-xs text-amber-600 dark:text-amber-400">×</span>
-                    <input type="number" min="0.1" step="0.1" placeholder="berat/vol" value={editFormData.content_weight}
+                    <input type="number" min="0.1" step="any" placeholder="isi per kecil" value={editFormData.content_weight}
                       onChange={(e) => setEditFormData({...editFormData, content_weight: e.target.value})}
                       className="w-24 px-2 py-1.5 bg-white dark:bg-gray-900 border border-amber-300 dark:border-amber-700 rounded-lg text-xs focus:border-primary-500 outline-none" />
                     <select value={editFormData.base_unit}
@@ -1222,6 +1337,15 @@ export default function ModalBahan() {
                       </span>
                     )}
                   </div>
+                  {editFormData.content_weight && (() => {
+                    const info = getPackageInfo(editFormData);
+                    return (
+                      <div className="rounded-lg bg-white/70 dark:bg-gray-900/60 px-3 py-2 text-xs text-amber-700 dark:text-amber-300 space-y-0.5">
+                        <p>1 {editFormData.unit} = {editFormData.content_count ? `${formatQty(editFormData.content_count)} x ` : ''}{formatQty(editFormData.content_weight)} {editFormData.base_unit} = <span className="font-semibold">{formatQty(info.itemsPerUnit)} {editFormData.base_unit}</span></p>
+                        <p>{formatQty(editFormData.quantity)} {editFormData.unit} masuk stok = <span className="font-semibold">{formatQty(info.totalBase)} {editFormData.base_unit}</span></p>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 

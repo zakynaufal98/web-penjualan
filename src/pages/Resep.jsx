@@ -4,6 +4,17 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import { friendlyError } from '../lib/errorUtils';
+import { addActivity } from '../lib/activityLog';
+
+const STOCK_ADJUSTMENT_REASONS = [
+  { value: 'trial_resep', label: 'Trial resep' },
+  { value: 'konsumsi_pribadi', label: 'Konsumsi pribadi' },
+  { value: 'rusak_hilang', label: 'Rusak / hilang' },
+  { value: 'expired', label: 'Expired' },
+  { value: 'produksi_non_tercatat', label: 'Produksi non-tercatat' },
+  { value: 'koreksi_stok', label: 'Koreksi stok fisik' },
+  { value: 'lainnya', label: 'Lainnya' },
+];
 
 const getRecipeUnit = (master) => {
   if (!master) return 'gr';
@@ -146,6 +157,10 @@ export default function Resep() {
   const [editMinStock, setEditMinStock] = useState('');
   const [editItemsPerUnit, setEditItemsPerUnit] = useState('');
   const [editBaseUnit, setEditBaseUnit] = useState('gr');
+  const [stockAdjustmentMode, setStockAdjustmentMode] = useState('reduce');
+  const [stockAdjustmentQty, setStockAdjustmentQty] = useState('');
+  const [stockAdjustmentReason, setStockAdjustmentReason] = useState('trial_resep');
+  const [stockAdjustmentNote, setStockAdjustmentNote] = useState('');
   const [editStockLoading, setEditStockLoading] = useState(false);
   const [stockFilter, setStockFilter] = useState('all');
   const [toast, setToast] = useState({ message: '', type: 'success' });
@@ -179,9 +194,11 @@ export default function Resep() {
           pricePerBase = ing.unit_price / ing.items_per_unit;
           qtyBase = ing.quantity * ing.items_per_unit;
         } else if (ing.unit === 'kg') {
-          pricePerBase = ing.unit_price / 1000; qtyBase = ing.quantity * 1000;
+          qtyBase = ing.quantity * 1000;
+          pricePerBase = qtyBase > 0 ? ing.unit_price / qtyBase : 0;
         } else if (ing.unit === 'liter') {
-          pricePerBase = ing.unit_price / 1000; qtyBase = ing.quantity * 1000;
+          qtyBase = ing.quantity * 1000;
+          pricePerBase = qtyBase > 0 ? ing.unit_price / qtyBase : 0;
         } else if (ing.unit === 'gr' || ing.unit === 'ml') {
           // unit_price is total batch price (e.g. 35000 for 500gr), not per-gram
           pricePerBase = ing.unit_price / ing.quantity; qtyBase = ing.quantity;
@@ -343,21 +360,69 @@ export default function Resep() {
     setEditMinStock(master.min_stock ?? 0);
     setEditItemsPerUnit(master.items_per_unit ?? '');
     setEditBaseUnit(master.base_unit ?? 'gr');
+    setStockAdjustmentMode('reduce');
+    setStockAdjustmentQty('');
+    setStockAdjustmentReason('trial_resep');
+    setStockAdjustmentNote('');
   };
 
   const handleSaveStock = async (e) => {
     e.preventDefault();
     setEditStockLoading(true);
+    const currentStock = parseFloat(editingMaster.current_stock) || 0;
+    const adjustmentQty = parseFloat(stockAdjustmentQty) || 0;
+    const manualStock = parseFloat(editStockValue) || 0;
+    const reasonLabel = STOCK_ADJUSTMENT_REASONS.find(reason => reason.value === stockAdjustmentReason)?.label || 'Koreksi stok';
+    let nextStock = manualStock;
+
+    if (stockAdjustmentMode === 'add') {
+      if (adjustmentQty <= 0) {
+        setToast({ message: 'Jumlah koreksi harus lebih dari 0.', type: 'error' });
+        setEditStockLoading(false);
+        return;
+      }
+      nextStock = currentStock + adjustmentQty;
+    } else if (stockAdjustmentMode === 'reduce') {
+      if (adjustmentQty <= 0) {
+        setToast({ message: 'Jumlah pemakaian harus lebih dari 0.', type: 'error' });
+        setEditStockLoading(false);
+        return;
+      }
+      nextStock = Math.max(0, currentStock - adjustmentQty);
+    }
+
     const itemsPerUnit = editItemsPerUnit !== '' ? parseFloat(editItemsPerUnit) : null;
-    await supabase
+    const { error: updateError } = await supabase
       .from('ingredient_masters')
       .update({
-        current_stock: parseFloat(editStockValue) || 0,
+        current_stock: parseFloat(nextStock.toFixed(4)),
         min_stock: parseFloat(editMinStock) || 0,
         items_per_unit: itemsPerUnit,
         base_unit: itemsPerUnit ? editBaseUnit : null,
       })
       .eq('id', editingMaster.id);
+
+    if (updateError) {
+      setToast({ message: friendlyError(updateError), type: 'error' });
+      setEditStockLoading(false);
+      return;
+    }
+
+    if (stockAdjustmentMode !== 'set') {
+      const direction = stockAdjustmentMode === 'reduce' ? 'dikurangi' : 'ditambah';
+      addActivity({
+        type: stockAdjustmentMode === 'reduce' ? 'warning' : 'info',
+        title: `Stok ${editingMaster.name} ${direction}`,
+        description: `${formatQty(adjustmentQty)} ${editingMaster.unit} - ${reasonLabel}${stockAdjustmentNote ? ` (${stockAdjustmentNote})` : ''}`,
+      });
+    } else if (manualStock !== currentStock) {
+      addActivity({
+        type: 'info',
+        title: `Stok ${editingMaster.name} diset manual`,
+        description: `${formatQty(currentStock)} ${editingMaster.unit} menjadi ${formatQty(nextStock)} ${editingMaster.unit}${stockAdjustmentNote ? ` (${stockAdjustmentNote})` : ''}`,
+      });
+    }
+
     setEditingMaster(null);
     setToast({ message: 'Stok berhasil diperbarui!', type: 'success' });
     fetchIngredientMasters();
@@ -400,6 +465,15 @@ export default function Resep() {
     if (isNaN(n)) return qty;
     if (Number.isInteger(n)) return n.toLocaleString('id-ID');
     return parseFloat(n.toFixed(2)).toLocaleString('id-ID');
+  };
+
+  const getStockAdjustmentPreview = () => {
+    if (!editingMaster) return 0;
+    const currentStock = parseFloat(editingMaster.current_stock) || 0;
+    const adjustmentQty = parseFloat(stockAdjustmentQty) || 0;
+    if (stockAdjustmentMode === 'add') return currentStock + adjustmentQty;
+    if (stockAdjustmentMode === 'reduce') return Math.max(0, currentStock - adjustmentQty);
+    return parseFloat(editStockValue) || 0;
   };
 
   // Konversi stok master ke unit yang dipakai di resep untuk hitung "cukup untuk"
@@ -644,11 +718,11 @@ export default function Resep() {
                         })}
                       />
                     </div>
-                    <div className="w-full sm:w-40">
-                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Qty per 1 pcs</label>
+                    <div className="w-full sm:w-44">
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">Qty per 1 cup/pcs</label>
                       <div className="flex">
                         <input
-                          type="number" min="0" step="any" required placeholder="100"
+                          type="number" min="0" step="any" required placeholder="Cth: 5"
                           value={newItem.quantity_per_unit}
                           onChange={(e) => setNewItem({ ...newItem, quantity_per_unit: e.target.value })}
                           className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-l-lg text-sm focus:border-primary-500 outline-none"
@@ -666,6 +740,9 @@ export default function Resep() {
                           <option value="lembar">lembar</option>
                         </select>
                       </div>
+                      <p className="mt-1 text-[11px] leading-snug text-gray-400">
+                        Jika 60 gr untuk 12 cup, isi 5 gr.
+                      </p>
                     </div>
                     <button
                       type="submit" disabled={saving}
@@ -856,7 +933,7 @@ export default function Resep() {
             <form onSubmit={handleSaveRecipeItem} className="p-4 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                  Qty per 1 pcs produk
+                  Qty per 1 cup/pcs produk
                 </label>
                 <div className="flex gap-2">
                   <input
@@ -878,6 +955,9 @@ export default function Resep() {
                     <option value="lembar">lembar</option>
                   </select>
                 </div>
+                <p className="mt-1 text-xs text-gray-400">
+                  Contoh: vla 60 gr untuk 12 cup berarti 5 gr per cup.
+                </p>
               </div>
               <button
                 type="submit" disabled={editRecipeLoading}
@@ -901,29 +981,100 @@ export default function Resep() {
               </button>
             </div>
             <form onSubmit={handleSaveStock} className="p-4 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-xl bg-gray-50 dark:bg-gray-800 p-3">
+                <p className="text-xs text-gray-500 dark:text-gray-400">Stok saat ini</p>
+                <p className="mt-1 text-lg font-bold text-gray-900 dark:text-white">
+                  {formatQty(editingMaster.current_stock)} <span className="text-sm font-medium text-gray-400">{editingMaster.unit}</span>
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Jenis koreksi</label>
+                <div className="grid grid-cols-3 gap-1 rounded-xl bg-gray-100 dark:bg-gray-800 p-1">
+                  {[
+                    { value: 'reduce', label: 'Kurangi' },
+                    { value: 'add', label: 'Tambah' },
+                    { value: 'set', label: 'Set manual' },
+                  ].map(mode => (
+                    <button
+                      key={mode.value}
+                      type="button"
+                      onClick={() => setStockAdjustmentMode(mode.value)}
+                      className={`px-2 py-2 rounded-lg text-xs font-semibold transition-colors ${stockAdjustmentMode === mode.value ? 'bg-white dark:bg-gray-900 text-primary-600 shadow-sm' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+                    >
+                      {mode.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {stockAdjustmentMode === 'set' ? (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                    Stok Saat Ini ({editingMaster.unit})
+                    Stok Fisik Sekarang ({editingMaster.unit})
                   </label>
                   <input
-                    type="number" min="0" step="0.01" required
+                    type="number" min="0" step="any" required autoFocus
                     value={editStockValue}
                     onChange={(e) => setEditStockValue(e.target.value)}
                     className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                    Stok Minimum ({editingMaster.unit})
-                  </label>
-                  <input
-                    type="number" min="0" step="0.01"
-                    value={editMinStock}
-                    onChange={(e) => setEditMinStock(e.target.value)}
-                    className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
-                  />
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                      Jumlah {stockAdjustmentMode === 'reduce' ? 'Dipakai' : 'Ditambah'} ({editingMaster.unit})
+                    </label>
+                    <input
+                      type="number" min="0" step="any" required autoFocus
+                      value={stockAdjustmentQty}
+                      onChange={(e) => setStockAdjustmentQty(e.target.value)}
+                      className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Alasan</label>
+                    <select
+                      value={stockAdjustmentReason}
+                      onChange={(e) => setStockAdjustmentReason(e.target.value)}
+                      className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                    >
+                      {STOCK_ADJUSTMENT_REASONS.map(reason => (
+                        <option key={reason.value} value={reason.value}>{reason.label}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
+              )}
+
+              <div className="rounded-xl border border-primary-100 dark:border-primary-900/40 bg-primary-50/70 dark:bg-primary-900/10 px-3 py-2 text-xs text-primary-700 dark:text-primary-300">
+                Setelah disimpan: <span className="font-bold">{formatQty(getStockAdjustmentPreview())} {editingMaster.unit}</span>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                  Catatan <span className="font-normal text-gray-400">(opsional)</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="Cth: dipakai buat tester rasa coklat"
+                  value={stockAdjustmentNote}
+                  onChange={(e) => setStockAdjustmentNote(e.target.value)}
+                  className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                  Stok Minimum ({editingMaster.unit})
+                </label>
+                <input
+                  type="number" min="0" step="any"
+                  value={editMinStock}
+                  onChange={(e) => setEditMinStock(e.target.value)}
+                  className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
@@ -952,7 +1103,7 @@ export default function Resep() {
                 {editItemsPerUnit && (
                   <p className="text-xs text-primary-600 dark:text-primary-400 mt-1.5">
                     1 {editingMaster.unit} = {editItemsPerUnit} {editBaseUnit}
-                    {editStockValue ? ` · stok total: ${formatQty(parseFloat(editStockValue) * parseFloat(editItemsPerUnit))} ${editBaseUnit}` : ''}
+                    {` · stok total setelah koreksi: ${formatQty(getStockAdjustmentPreview() * parseFloat(editItemsPerUnit))} ${editBaseUnit}`}
                   </p>
                 )}
                 <p className="text-xs text-gray-400 mt-1">Untuk kemasan seperti kotak, pack, botol, dll.</p>

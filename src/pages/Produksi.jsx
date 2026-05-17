@@ -29,10 +29,11 @@ import {
   todayInputValue,
 } from '../lib/dateUtils';
 import { reconcileProductStock } from '../lib/productStock';
+import { addActivity } from '../lib/activityLog';
 
 export default function Produksi() {
   const [logs, setLogs] = useState([]);
-  const [filters, setFilters] = useState({ period: 'all', productId: '', status: 'all' });
+  const [filters, setFilters] = useState({ period: 'all', productId: '', status: 'all', startDate: '', endDate: '' });
   const [salesMap, setSalesMap] = useState({});
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -164,15 +165,34 @@ export default function Produksi() {
     return qty;
   };
 
-  const getIngredientStockDelta = (item, batchQty) => {
+  const getIngredientUsage = (item, batchQty) => {
     const master = item.ingredient_masters;
-    if (!master) return 0;
+    if (!master) return { stockDelta: 0, needBase: null, stockBase: null, remainingBase: null, baseUnit: null };
     const totalInRecipeUnit = item.quantity_per_unit * batchQty;
     if (!master.items_per_unit || !master.base_unit || item.unit === master.unit) {
-      return convertUnit(totalInRecipeUnit, item.unit, master.unit);
+      const stockDelta = convertUnit(totalInRecipeUnit, item.unit, master.unit);
+      const hasBase = master.items_per_unit && master.base_unit;
+      return {
+        stockDelta,
+        needBase: hasBase ? stockDelta * master.items_per_unit : null,
+        stockBase: hasBase ? (master.current_stock || 0) * master.items_per_unit : null,
+        remainingBase: hasBase ? ((master.current_stock || 0) - stockDelta) * master.items_per_unit : null,
+        baseUnit: hasBase ? master.base_unit : null,
+      };
     }
     const totalInBaseUnit = convertUnit(totalInRecipeUnit, item.unit, master.base_unit);
-    return totalInBaseUnit / master.items_per_unit;
+    const stockDelta = totalInBaseUnit / master.items_per_unit;
+    return {
+      stockDelta,
+      needBase: totalInBaseUnit,
+      stockBase: (master.current_stock || 0) * master.items_per_unit,
+      remainingBase: ((master.current_stock || 0) - stockDelta) * master.items_per_unit,
+      baseUnit: master.base_unit,
+    };
+  };
+
+  const getIngredientStockDelta = (item, batchQty) => {
+    return getIngredientUsage(item, batchQty).stockDelta;
   };
 
   const checkProductionReadiness = async (productId, totalQty) => {
@@ -198,7 +218,8 @@ export default function Produksi() {
       const master = item.ingredient_masters;
       if (!master) return;
       const perUnitNeed = getIngredientStockDelta(item, 1);
-      const totalNeed = getIngredientStockDelta(item, totalQty);
+      const usage = getIngredientUsage(item, totalQty);
+      const totalNeed = usage.stockDelta;
       if (perUnitNeed > 0) maxUnits = Math.min(maxUnits, Math.floor((master.current_stock || 0) / perUnitNeed));
       items.push({
         name: master.name,
@@ -206,6 +227,10 @@ export default function Produksi() {
         stock: master.current_stock || 0,
         remaining: (master.current_stock || 0) - totalNeed,
         unit: master.unit,
+        needBase: usage.needBase,
+        stockBase: usage.stockBase,
+        remainingBase: usage.remainingBase,
+        baseUnit: usage.baseUnit,
       });
       if ((master.current_stock || 0) < totalNeed) {
         shortages.push({ name: master.name, need: totalNeed, stock: master.current_stock || 0, unit: master.unit });
@@ -410,6 +435,11 @@ export default function Produksi() {
     }
 
     await reconcileProductStock(formData.product_id, { force: true });
+    addActivity({
+      type: 'production',
+      title: editingLog ? 'Catatan produksi diperbarui' : 'Produksi baru dicatat',
+      description: `${selectedProduct?.name || 'Produk'} bawa ${newBawa} pcs${newFailed > 0 ? `, gagal ${newFailed} pcs` : ''}.`,
+    });
     setIsModalOpen(false);
     resetForm();
     fetchLogs();
@@ -448,6 +478,11 @@ export default function Produksi() {
       ? (newKonsumsi === 0 ? 'Konsumsi berhasil dihapus.' : `Konsumsi diperbarui menjadi ${newKonsumsi} pcs.`)
       : `${rawAmount} pcs dicatat sebagai konsumsi sendiri.`;
     setToast({ message: msg, type: 'success' });
+    addActivity({
+      type: 'production',
+      title: konsumsiDialog.mode === 'edit' ? 'Konsumsi produk diperbarui' : 'Konsumsi produk dicatat',
+      description: `${konsumsiDialog.nama}: ${newKonsumsi} pcs konsumsi tercatat.`,
+    });
     await fetchLogs();
     fetchProducts();
   };
@@ -471,6 +506,11 @@ export default function Produksi() {
 
     await reconcileProductStock(productId, { force: true });
     setToast({ message: 'Catatan produksi dihapus dan stok dikembalikan.', type: 'success' });
+    addActivity({
+      type: 'production',
+      title: 'Catatan produksi dihapus',
+      description: `Produksi ${quantity} pcs dikembalikan dari stok.`,
+    });
     fetchLogs();
     fetchProducts();
   };
@@ -483,6 +523,13 @@ export default function Produksi() {
   const formFailedQty = parseInt(formData.failed) || 0;
   const formTotalQty = formSuccessQty + formFailedQty;
   const productStockAfter = selectedProduct ? (selectedProduct.stock || 0) + formSuccessQty : null;
+  const getBatchStatus = (sisaBatch, failed = 0, konsumsi = 0) => {
+    if (sisaBatch <= 0) return { label: 'Habis', className: 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300' };
+    if (failed > 0) return { label: 'Ada gagal', className: 'bg-rose-50 text-rose-700 dark:bg-rose-900/20 dark:text-rose-300' };
+    if (konsumsi > 0) return { label: 'Ada konsumsi', className: 'bg-orange-50 text-orange-700 dark:bg-orange-900/20 dark:text-orange-300' };
+    if (sisaBatch <= 5) return { label: 'Hampir habis', className: 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300' };
+    return { label: 'Tersedia', className: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300' };
+  };
   const filteredLogs = useMemo(() => logs.filter(log => {
     const allocation = salesMap[log.id] || {};
     const terjual = allocation.sold || 0;
@@ -502,6 +549,17 @@ export default function Produksi() {
       start.setDate(1);
       start.setHours(0, 0, 0, 0);
       matchesPeriod = date >= start;
+    }
+    if (filters.period === 'custom') {
+      matchesPeriod = true;
+      if (filters.startDate) {
+        const from = new Date(`${filters.startDate}T00:00:00`);
+        if (date < from) matchesPeriod = false;
+      }
+      if (filters.endDate) {
+        const to = new Date(`${filters.endDate}T23:59:59`);
+        if (date > to) matchesPeriod = false;
+      }
     }
     const matchesProduct = !filters.productId || log.product_id === filters.productId;
     const matchesStatus =
@@ -572,6 +630,7 @@ export default function Produksi() {
               <option value="today">Hari ini</option>
               <option value="week">7 hari</option>
               <option value="month">Bulan ini</option>
+              <option value="custom">Rentang</option>
             </select>
             <select value={filters.productId} onChange={(e) => setFilters({ ...filters, productId: e.target.value })} className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none">
               <option value="">Semua produk</option>
@@ -584,13 +643,29 @@ export default function Produksi() {
               <option value="failed">Ada gagal</option>
               <option value="consumed">Ada konsumsi</option>
             </select>
-            <button type="button" onClick={() => setFilters({ period: 'all', productId: '', status: 'all' })} className="px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-primary-600 hover:bg-white dark:hover:bg-gray-900 transition-colors">
+            <button type="button" onClick={() => setFilters({ period: 'all', productId: '', status: 'all', startDate: '', endDate: '' })} className="px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-primary-600 hover:bg-white dark:hover:bg-gray-900 transition-colors">
               Reset
             </button>
           </div>
+          {filters.period === 'custom' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input
+                type="date"
+                value={filters.startDate}
+                onChange={(e) => setFilters({ ...filters, startDate: e.target.value })}
+                className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none"
+              />
+              <input
+                type="date"
+                value={filters.endDate}
+                onChange={(e) => setFilters({ ...filters, endDate: e.target.value })}
+                className="px-3 py-2 bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-xl text-sm outline-none"
+              />
+            </div>
+          )}
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse min-w-[760px]">
+          <table className="w-full text-left border-collapse min-w-[860px]">
             <thead>
               <tr className="bg-gray-50 dark:bg-gray-800/50 text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
                 <th className="p-4 font-medium">Tanggal & Waktu</th>
@@ -600,16 +675,17 @@ export default function Produksi() {
                 <th className="p-4 font-medium text-right">Terjual</th>
                 <th className="p-4 font-medium text-right">Konsumsi</th>
                 <th className="p-4 font-medium text-right">Sisa Batch</th>
+                <th className="p-4 font-medium">Status</th>
                 <th className="p-4 font-medium">Catatan</th>
                 <th className="p-4 font-medium">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-800 text-sm">
               {loading ? (
-                <tr><td colSpan="9" className="p-8 text-center text-gray-500">Memuat data...</td></tr>
+                <tr><td colSpan="10" className="p-8 text-center text-gray-500">Memuat data...</td></tr>
               ) : logs.length === 0 ? (
                 <tr>
-                  <td colSpan="9" className="p-10">
+                  <td colSpan="10" className="p-10">
                     <div className="flex flex-col items-center text-center">
                       <ClipboardList size={40} className="text-gray-300 dark:text-gray-600 mb-3" />
                       <p className="font-semibold text-gray-900 dark:text-gray-100">Belum ada catatan produksi</p>
@@ -621,13 +697,14 @@ export default function Produksi() {
                   </td>
                 </tr>
               ) : filteredLogs.length === 0 ? (
-                <tr><td colSpan="9" className="p-8 text-center text-gray-500">Tidak ada produksi yang cocok dengan filter.</td></tr>
+                <tr><td colSpan="10" className="p-8 text-center text-gray-500">Tidak ada produksi yang cocok dengan filter.</td></tr>
               ) : (
                 filteredLogs.map((log) => {
                   const allocation = salesMap[log.id] || {};
                   const terjual  = allocation.sold || 0;
                   const konsumsi = log.konsumsi || 0;
                   const sisaBatch = allocation.remaining ?? Math.max(0, (log.quantity || 0) - konsumsi - terjual);
+                  const batchStatus = getBatchStatus(sisaBatch, log.failed || 0, konsumsi);
                   return (
                   <tr key={log.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
@@ -676,6 +753,11 @@ export default function Produksi() {
                     <td className="p-4 text-right">
                       <span className={`font-semibold ${sisaBatch === 0 ? 'text-red-600 dark:text-red-400' : sisaBatch <= 5 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
                         {sisaBatch} pcs
+                      </span>
+                    </td>
+                    <td className="p-4">
+                      <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold whitespace-nowrap ${batchStatus.className}`}>
+                        {batchStatus.label}
                       </span>
                     </td>
                     <td className="p-4 text-gray-500 dark:text-gray-400 text-sm">
@@ -822,7 +904,10 @@ export default function Produksi() {
                   <div className="mt-2 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-900/30 px-3 py-2 text-xs text-red-700 dark:text-red-300 space-y-1">
                     <p className="font-semibold">Bahan belum cukup untuk produksi ini.</p>
                     {productionCheck.shortages.slice(0, 3).map(item => (
-                      <p key={item.name}>{item.name}: perlu {item.need.toFixed(2)} {item.unit}, stok {item.stock.toFixed(2)} {item.unit}</p>
+                      <p key={item.name}>
+                        {item.name}: perlu {item.need.toFixed(2)} {item.unit}
+                        {item.needBase !== null ? ` (${item.needBase.toFixed(2)} ${item.baseUnit})` : ''}, stok {item.stock.toFixed(2)} {item.unit}
+                      </p>
                     ))}
                   </div>
                 )}
@@ -900,7 +985,9 @@ export default function Produksi() {
                         <div key={item.name} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
                           <span className="min-w-0 truncate text-gray-600 dark:text-gray-300">{item.name}</span>
                           <span className={item.remaining < 0 ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-500 dark:text-gray-400'}>
-                            -{item.need.toFixed(2)} {item.unit}, sisa {Math.max(0, item.remaining).toFixed(2)}
+                            -{item.need.toFixed(2)} {item.unit}
+                            {item.needBase !== null ? ` (${item.needBase.toFixed(2)} ${item.baseUnit})` : ''}, sisa {Math.max(0, item.remaining).toFixed(2)} {item.unit}
+                            {item.remainingBase !== null ? ` (${Math.max(0, item.remainingBase).toFixed(2)} ${item.baseUnit})` : ''}
                           </span>
                         </div>
                       ))}
