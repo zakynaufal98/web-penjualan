@@ -1,9 +1,17 @@
 import { useState, useEffect } from 'react';
-import { Calculator, Plus, Trash2, Save, ArrowRight, Search, X, Check } from 'lucide-react';
+import { Calculator, Plus, Trash2, Save, ArrowRight, Search, X, Check, Tags, Edit2 } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
+import { deleteToppingRecipeFromSupabase, fetchToppingRecipes, saveToppingRecipeToSupabase } from '../lib/toppings';
+import {
+  averageIngredientsForSelection,
+  getIngredientBaseUnit,
+  getIngredientDisplayPrice,
+  getIngredientPriceForUnit,
+  normalizeIngredientName,
+} from '../lib/ingredientCosts';
 
 const DRAFT_KEY = 'hpp_draft';
 
@@ -18,27 +26,12 @@ const loadDraft = () => {
 
 const getBaseUnit = (ingredient) => {
   if (!ingredient) return 'gr';
-  if (ingredient.items_per_unit && ingredient.base_unit) return ingredient.base_unit;
-  if (ingredient.unit === 'kg') return 'gr';
-  if (ingredient.unit === 'liter') return 'ml';
-  return ingredient.unit || 'gr';
+  return getIngredientBaseUnit(ingredient);
 };
 
 const getDisplayPrice = (ingredient) => {
   if (!ingredient) return { price: 0, unit: 'gr' };
-  if (ingredient.items_per_unit && ingredient.base_unit) {
-    return { price: ingredient.unit_price / ingredient.items_per_unit, unit: ingredient.base_unit };
-  }
-  if (ingredient.unit === 'kg') {
-    return { price: ingredient.quantity > 0 ? ingredient.unit_price / (ingredient.quantity * 1000) : 0, unit: 'gr' };
-  }
-  if (ingredient.unit === 'liter') {
-    return { price: ingredient.quantity > 0 ? ingredient.unit_price / (ingredient.quantity * 1000) : 0, unit: 'ml' };
-  }
-  if (ingredient.unit === 'gr' || ingredient.unit === 'ml') {
-    return { price: ingredient.quantity > 0 ? ingredient.unit_price / ingredient.quantity : 0, unit: ingredient.unit };
-  }
-  return { price: ingredient.unit_price, unit: ingredient.unit };
+  return getIngredientDisplayPrice(ingredient);
 };
 
 const IngredientCombobox = ({ item, ingredients, onSelect, placement = 'bottom' }) => {
@@ -166,6 +159,18 @@ export default function KalkulatorHPP() {
   const [overhead, setOverhead] = useState(draft?.overhead ?? 5);
   const [batchSize, setBatchSize] = useState(draft?.batchSize ?? 1);
   const [selectedProductId, setSelectedProductId] = useState(draft?.selectedProductId || '');
+  const [activeTab, setActiveTab] = useState(draft?.activeTab || 'produk');
+  const [toppingName, setToppingName] = useState(draft?.toppingName || '');
+  const [toppingItems, setToppingItems] = useState(
+    draft?.toppingItems?.length
+      ? draft.toppingItems
+      : [{ id: Date.now() + 1, ingredient_id: '', used_qty: '', used_unit: 'gr' }]
+  );
+  const [toppingBatchSize, setToppingBatchSize] = useState(draft?.toppingBatchSize ?? 1);
+  const [toppingOverhead, setToppingOverhead] = useState(draft?.toppingOverhead ?? 5);
+  const [toppingMargin, setToppingMargin] = useState(draft?.toppingMargin ?? 50);
+  const [savedToppingRecipes, setSavedToppingRecipes] = useState([]);
+  const [editingToppingRecipeId, setEditingToppingRecipeId] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [toast, setToast] = useState({ message: '', type: 'success' });
   const [confirmDialog, setConfirmDialog] = useState({ open: false, title: '', message: '', onConfirm: null, variant: 'danger' });
@@ -175,7 +180,16 @@ export default function KalkulatorHPP() {
   useEffect(() => {
     fetchIngredients();
     fetchProducts();
+    fetchSavedToppingRecipes();
   }, []);
+
+  const fetchSavedToppingRecipes = async () => {
+    try {
+      setSavedToppingRecipes(await fetchToppingRecipes());
+    } catch (err) {
+      setToast({ message: `Topping Supabase belum siap: ${err.message}`, type: 'error' });
+    }
+  };
 
   useEffect(() => {
     const productId = location.state?.productId;
@@ -188,8 +202,21 @@ export default function KalkulatorHPP() {
 
   // Auto-save draft ke localStorage setiap ada perubahan
   useEffect(() => {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({ recipeName, recipeItems, margin, overhead, batchSize, selectedProductId }));
-  }, [recipeName, recipeItems, margin, overhead, batchSize, selectedProductId]);
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({
+      recipeName,
+      recipeItems,
+      margin,
+      overhead,
+      batchSize,
+      selectedProductId,
+      activeTab,
+      toppingName,
+      toppingItems,
+      toppingBatchSize,
+      toppingOverhead,
+      toppingMargin,
+    }));
+  }, [recipeName, recipeItems, margin, overhead, batchSize, selectedProductId, activeTab, toppingName, toppingItems, toppingBatchSize, toppingOverhead, toppingMargin]);
 
   const clearDraft = () => {
     setRecipeName('');
@@ -197,6 +224,12 @@ export default function KalkulatorHPP() {
     setMargin(50);
     setOverhead(5);
     setBatchSize(1);
+    setToppingName('');
+    setToppingItems([{ id: Date.now() + 1, ingredient_id: '', used_qty: '', used_unit: 'gr' }]);
+    setToppingBatchSize(1);
+    setToppingOverhead(5);
+    setToppingMargin(50);
+    setEditingToppingRecipeId('');
     // selectedProductId sengaja tidak di-reset agar tidak perlu pilih ulang
   };
 
@@ -206,58 +239,7 @@ export default function KalkulatorHPP() {
       .select('*')
       .order('purchase_date', { ascending: false });
     if (!data) return;
-
-    // Group by name, hitung weighted average price dari semua pembelian semua toko
-    const groups = {};
-    data.forEach(ing => {
-      const key = ing.name.trim().toLowerCase();
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(ing);
-    });
-
-    const averaged = Object.values(groups).map(entries => {
-      const template = entries[0];
-      if (entries.length === 1) return { ...template, _purchaseCount: 1 };
-
-      let totalCost = 0;
-      let totalQtyBase = 0;
-      entries.forEach(ing => {
-        let pricePerBase, qtyBase;
-        if (ing.items_per_unit && ing.base_unit) {
-          pricePerBase = ing.unit_price / ing.items_per_unit;
-          qtyBase = ing.quantity * ing.items_per_unit;
-        } else if (ing.unit === 'kg') {
-          qtyBase = ing.quantity * 1000;
-          pricePerBase = qtyBase > 0 ? ing.unit_price / qtyBase : 0;
-        } else if (ing.unit === 'liter') {
-          qtyBase = ing.quantity * 1000;
-          pricePerBase = qtyBase > 0 ? ing.unit_price / qtyBase : 0;
-        } else if (ing.unit === 'gr' || ing.unit === 'ml') {
-          pricePerBase = ing.quantity > 0 ? ing.unit_price / ing.quantity : 0;
-          qtyBase = ing.quantity;
-        } else {
-          pricePerBase = ing.unit_price;
-          qtyBase = ing.quantity;
-        }
-        totalCost += pricePerBase * qtyBase;
-        totalQtyBase += qtyBase;
-      });
-
-      const avgPricePerBase = totalQtyBase > 0 ? totalCost / totalQtyBase : 0;
-      let avgUnitPrice;
-      if (template.items_per_unit && template.base_unit) {
-        avgUnitPrice = avgPricePerBase * template.items_per_unit;
-      } else if (template.unit === 'kg' || template.unit === 'liter') {
-        avgUnitPrice = avgPricePerBase * 1000;
-      } else {
-        avgUnitPrice = avgPricePerBase;
-      }
-
-      const normalizedQuantity = ['kg', 'gr', 'liter', 'ml'].includes(template.unit) ? 1 : template.quantity;
-      return { ...template, quantity: normalizedQuantity, unit_price: avgUnitPrice, _purchaseCount: entries.length };
-    });
-
-    setIngredients(averaged);
+    setIngredients(averageIngredientsForSelection(data));
   };
 
   const fetchProducts = async () => {
@@ -367,8 +349,135 @@ export default function KalkulatorHPP() {
     }));
   };
 
+  const handleAddToppingItem = () => {
+    setToppingItems([...toppingItems, { id: Date.now(), ingredient_id: '', used_qty: '', used_unit: 'gr' }]);
+  };
+
+  const handleRemoveToppingItem = (id) => {
+    setToppingItems(toppingItems.filter(item => item.id !== id));
+  };
+
+  const handleToppingItemChange = (id, field, value) => {
+    setToppingItems(toppingItems.map(item => item.id === id ? { ...item, [field]: value } : item));
+  };
+
+  const handleToppingIngredientSelect = (id, ingredient) => {
+    setToppingItems(toppingItems.map(item => {
+      if (item.id !== id) return item;
+      if (!ingredient) return { ...item, ingredient_id: '', used_unit: 'gr' };
+      return { ...item, ingredient_id: ingredient.id, used_unit: getBaseUnit(ingredient) };
+    }));
+  };
+
+  const handleSaveToppingRecipe = async () => {
+    setIsSaving(true);
+    const { data: masters, error: mastersError } = await supabase
+      .from('ingredient_masters')
+      .select('id, name');
+
+    if (mastersError) {
+      setToast({ message: 'Gagal membaca master bahan topping.', type: 'error' });
+      setIsSaving(false);
+      return;
+    }
+
+    const masterMap = Object.fromEntries(
+      (masters || []).map(master => [normalizeIngredientName(master.name), master])
+    );
+    const validItems = toppingItems
+      .filter(item => item.ingredient_id && parseFloat(item.used_qty) > 0)
+      .map(item => {
+        const ingredient = ingredients.find(ing => ing.id === item.ingredient_id);
+        if (!ingredient) return null;
+        const master = masterMap[normalizeIngredientName(ingredient.name)];
+        if (!master) return null;
+        return {
+          ingredient_master_id: master.id,
+          ingredient_name: ingredient.name,
+          quantity_per_unit: parseFloat(item.used_qty) / (toppingBatchSize || 1),
+          unit: item.used_unit,
+          cost_per_unit: calculateRowCost(item) / (toppingBatchSize || 1),
+        };
+      })
+      .filter(Boolean);
+
+    if (!toppingName.trim()) {
+      setToast({ message: 'Nama topping wajib diisi dulu.', type: 'error' });
+      setIsSaving(false);
+      return;
+    }
+    if (validItems.length === 0 || toppingHppPerUnit === 0) {
+      setToast({ message: 'Pilih bahan topping yang sudah punya master bahan, lalu isi jumlahnya.', type: 'error' });
+      setIsSaving(false);
+      return;
+    }
+
+    try {
+      const existingRecipe = savedToppingRecipes.find(recipe => (
+        normalizeIngredientName(recipe.name) === normalizeIngredientName(toppingName)
+      ));
+      const savedRecipe = await saveToppingRecipeToSupabase({
+        id: editingToppingRecipeId || existingRecipe?.id,
+        name: toppingName,
+        batch_size: toppingBatchSize,
+        overhead_pct: toppingOverhead,
+        margin_pct: toppingMargin,
+        hpp_per_unit: toppingHppPerUnit,
+        suggested_price: suggestedToppingPrice,
+        items: validItems,
+      });
+      setEditingToppingRecipeId(savedRecipe.id);
+      await fetchSavedToppingRecipes();
+      setToast({ message: 'HPP topping berhasil disimpan ke Supabase.', type: 'success' });
+    } catch (err) {
+      setToast({ message: `Gagal simpan topping: ${err.message}`, type: 'error' });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleEditToppingRecipe = (recipe) => {
+    setEditingToppingRecipeId(recipe.id);
+    setActiveTab('topping');
+    setToppingName(recipe.name);
+    setToppingBatchSize(recipe.batch_size || 1);
+    setToppingOverhead(recipe.overhead_pct || 0);
+    setToppingMargin(recipe.margin_pct || 0);
+    setToppingItems(recipe.items.map((item, index) => {
+      const ingredient = ingredients.find(ing => normalizeIngredientName(ing.name) === item.ingredient_key);
+      return {
+        id: `${recipe.id}-${item.id || index}`,
+        ingredient_id: ingredient?.id || '',
+        used_qty: item.quantity_per_unit * (recipe.batch_size || 1),
+        used_unit: item.unit || 'gr',
+      };
+    }));
+    setToast({ message: `Template ${recipe.name} siap diedit.`, type: 'info' });
+  };
+
+  const handleDeleteToppingRecipe = (recipe) => {
+    openConfirm(
+      'Hapus Template Topping?',
+      `Template "${recipe.name}" akan dihapus dari Supabase.`,
+      async () => {
+        try {
+          await deleteToppingRecipeFromSupabase(recipe.id);
+          if (editingToppingRecipeId === recipe.id) setEditingToppingRecipeId('');
+          await fetchSavedToppingRecipes();
+          setToast({ message: 'Template topping berhasil dihapus.', type: 'success' });
+        } catch (err) {
+          setToast({ message: `Gagal hapus topping: ${err.message}`, type: 'error' });
+        }
+      },
+      'danger'
+    );
+  };
+
   // Hitung harga per satuan dasar (gr atau ml) dari data pembelian
   const getNormalizedPricePerUnit = (ingredient, targetUnit) => {
+    if (ingredient?.__pricePerBase !== undefined) {
+      return getIngredientPriceForUnit(ingredient, targetUnit);
+    }
     if (!ingredient) return 0;
 
     // Kasus 1: beli per kemasan (pack/bungkus/botol/kaleng) dengan isi yang diketahui
@@ -414,6 +523,13 @@ export default function KalkulatorHPP() {
   const totalHPPWithOverhead = totalHPP + overheadAmount;
   const hppPerUnit = totalHPPWithOverhead / (batchSize || 1);
   const suggestedPrice = hppPerUnit + (hppPerUnit * (margin / 100));
+  const totalToppingHPP = toppingItems.reduce((acc, item) => acc + calculateRowCost(item), 0);
+  const toppingOverheadAmount = totalToppingHPP * ((toppingOverhead || 0) / 100);
+  const totalToppingWithOverhead = totalToppingHPP + toppingOverheadAmount;
+  const toppingHppPerUnit = totalToppingWithOverhead / (toppingBatchSize || 1);
+  const suggestedToppingPrice = toppingHppPerUnit + (toppingHppPerUnit * (toppingMargin / 100));
+  const hasProductDraft = recipeName || recipeItems.some(i => i.ingredient_id || i.used_qty);
+  const hasToppingDraft = toppingName || toppingItems.some(i => i.ingredient_id || i.used_qty);
 
   return (
     <div className="space-y-6">
@@ -422,7 +538,7 @@ export default function KalkulatorHPP() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-50">Kalkulator HPP</h1>
           <p className="text-gray-500 dark:text-gray-400 mt-1">Hitung Harga Pokok Penjualan berdasarkan gramasi resep.</p>
         </div>
-        {(recipeName || recipeItems.some(i => i.ingredient_id || i.used_qty)) && (
+        {(hasProductDraft || hasToppingDraft) && (
           <button
             onClick={() => openConfirm('Reset Kalkulator?', 'Semua input akan dihapus dan tidak bisa dikembalikan.', clearDraft, 'warning')}
             className="flex items-center gap-2 text-sm text-gray-400 hover:text-red-500 transition-colors"
@@ -432,6 +548,26 @@ export default function KalkulatorHPP() {
         )}
       </div>
 
+      <div className="inline-flex gap-1 rounded-xl bg-gray-100 dark:bg-gray-800 p-1">
+        {[
+          { id: 'produk', label: 'HPP Produk', icon: Calculator },
+          { id: 'topping', label: 'HPP Topping', icon: Tags },
+        ].map(tab => {
+          const Icon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${activeTab === tab.id ? 'bg-white dark:bg-gray-900 text-primary-600 shadow-sm' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+            >
+              <Icon size={15} /> {tab.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeTab === 'produk' ? (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 p-6">
@@ -677,6 +813,238 @@ export default function KalkulatorHPP() {
           </div>
         </div>
       </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 space-y-6">
+            <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 p-6">
+              <div className="mb-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="sm:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Nama Topping</label>
+                  <input
+                    type="text"
+                    placeholder="Cth: Keju parut, vla, coklat crumble"
+                    value={toppingName}
+                    onChange={(e) => setToppingName(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none transition-colors"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Dihasilkan</label>
+                  <input
+                    type="number" min="1" step="1"
+                    value={toppingBatchSize}
+                    onChange={(e) => setToppingBatchSize(e.target.value === '' ? 1 : parseInt(e.target.value) || 1)}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none transition-colors"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">Jumlah porsi topping yang dihasilkan.</p>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex items-center justify-between pb-2 border-b border-gray-100 dark:border-gray-800">
+                  <h3 className="font-bold text-gray-900 dark:text-white">Bahan topping</h3>
+                  <button
+                    type="button"
+                    onClick={handleAddToppingItem}
+                    className="flex items-center gap-1.5 text-sm font-medium text-primary-600 hover:text-primary-700"
+                  >
+                    <Plus size={16} /> Tambah Bahan
+                  </button>
+                </div>
+
+                {toppingItems.map((item, index) => (
+                  <div key={item.id} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_13rem_8rem_auto] gap-4 items-end p-4 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-100 dark:border-gray-800">
+                    <div className="flex-1 w-full">
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Pilih Bahan</label>
+                      <IngredientCombobox
+                        item={item}
+                        ingredients={ingredients}
+                        placement={toppingItems.length > 1 && index >= toppingItems.length - 2 ? 'top' : 'bottom'}
+                        onSelect={(ingredient) => handleToppingIngredientSelect(item.id, ingredient)}
+                      />
+                    </div>
+
+                    <div className="w-full">
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Jumlah batch</label>
+                      <div className="flex">
+                        <input
+                          type="number" min="0" step="any"
+                          value={item.used_qty}
+                          onChange={(e) => handleToppingItemChange(item.id, 'used_qty', e.target.value)}
+                          className="w-full min-w-0 px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-l-lg text-sm focus:border-primary-500 outline-none"
+                        />
+                        <select
+                          value={item.used_unit}
+                          onChange={(e) => handleToppingItemChange(item.id, 'used_unit', e.target.value)}
+                          className="shrink-0 w-20 px-1 bg-gray-100 dark:bg-gray-800 border border-l-0 border-gray-200 dark:border-gray-700 rounded-r-lg text-sm outline-none"
+                        >
+                          <option value="gr">gr</option>
+                          <option value="kg">kg</option>
+                          <option value="ml">ml</option>
+                          <option value="liter">L</option>
+                          <option value="pcs">pcs</option>
+                          <option value="lembar">lembar</option>
+                          <option value="bungkus">bungkus</option>
+                          <option value="botol">botol</option>
+                          <option value="kaleng">kaleng</option>
+                          <option value="pack">pack</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="w-full">
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Biaya</label>
+                      <div className="px-3 py-2 bg-gray-100 dark:bg-gray-900 border border-transparent rounded-lg text-sm font-medium text-gray-900 dark:text-gray-100">
+                        Rp {Math.round(calculateRowCost(item)).toLocaleString('id-ID')}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveToppingItem(item.id)}
+                      className="p-2 text-gray-400 hover:text-red-600 transition-colors mb-0.5"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 p-6 sticky top-24">
+              <div className="flex items-center gap-3 mb-6 pb-4 border-b border-gray-100 dark:border-gray-800">
+                <div className="p-2.5 bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400 rounded-xl">
+                  <Tags size={24} />
+                </div>
+                <h2 className="text-lg font-bold text-gray-900 dark:text-white">Hasil Topping</h2>
+              </div>
+
+              <div className="space-y-4">
+                {totalToppingHPP > 0 && (
+                  <div className="space-y-2">
+                    {toppingItems.filter(item => calculateRowCost(item) > 0).map(item => {
+                      const ing = ingredients.find(i => i.id === item.ingredient_id);
+                      const cost = calculateRowCost(item);
+                      const pct = totalToppingHPP > 0 ? (cost / totalToppingHPP) * 100 : 0;
+                      return (
+                        <div key={item.id}>
+                          <div className="flex justify-between items-center text-xs mb-0.5">
+                            <span className="text-gray-600 dark:text-gray-400 truncate max-w-[60%]">{ing?.name ?? '-'}</span>
+                            <span className="text-gray-700 dark:text-gray-300 font-medium shrink-0">
+                              Rp {Math.round(cost).toLocaleString('id-ID')}
+                              <span className="text-gray-400 ml-1">({Math.round(pct)}%)</span>
+                            </span>
+                          </div>
+                          <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-1.5">
+                            <div className="bg-primary-400 dark:bg-primary-500 h-1.5 rounded-full" style={{ width: `${pct}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div className="border-t border-gray-100 dark:border-gray-800 pt-2" />
+                  </div>
+                )}
+
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-gray-500">Total HPP topping</span>
+                  <span className="font-semibold text-gray-700 dark:text-gray-300">
+                    Rp {Math.round(totalToppingWithOverhead).toLocaleString('id-ID')}
+                  </span>
+                </div>
+
+                <div>
+                  <label className="flex justify-between items-center text-sm text-gray-500 mb-2">
+                    <span>Overhead</span>
+                    <span className="font-medium text-amber-600 dark:text-amber-400">{toppingOverhead}%</span>
+                  </label>
+                  <input
+                    type="range" min="0" max="30" step="1"
+                    value={toppingOverhead}
+                    onChange={(e) => setToppingOverhead(parseInt(e.target.value))}
+                    className="w-full accent-amber-500"
+                  />
+                </div>
+
+                <div className="flex justify-between items-center p-3 bg-primary-50 dark:bg-primary-900/20 rounded-xl">
+                  <span className="text-sm font-medium text-primary-700 dark:text-primary-300">HPP per porsi ({toppingBatchSize})</span>
+                  <span className="text-lg font-bold text-primary-700 dark:text-primary-300">
+                    Rp {Math.round(toppingHppPerUnit).toLocaleString('id-ID')}
+                  </span>
+                </div>
+
+                <div>
+                  <label className="flex justify-between items-center text-sm text-gray-500 mb-2">
+                    <span>Target Margin</span>
+                    <span className="font-medium text-primary-600 dark:text-primary-400">{toppingMargin}%</span>
+                  </label>
+                  <input
+                    type="range" min="0" max="200" step="5"
+                    value={toppingMargin}
+                    onChange={(e) => setToppingMargin(e.target.value === '' ? '' : parseInt(e.target.value))}
+                    className="w-full accent-primary-600"
+                  />
+                </div>
+
+                <div className="pt-4 border-t border-gray-100 dark:border-gray-800">
+                  <span className="block text-sm text-gray-500 mb-1">Saran harga topping / porsi</span>
+                  <span className="block text-3xl font-bold text-emerald-600 dark:text-emerald-400">
+                    Rp {Math.round(suggestedToppingPrice).toLocaleString('id-ID')}
+                  </span>
+                  <span className="block text-xs text-gray-400 mt-1">
+                    Potensi untung: Rp {Math.round(suggestedToppingPrice - toppingHppPerUnit).toLocaleString('id-ID')} / porsi
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSaveToppingRecipe}
+                  disabled={!toppingName.trim() || toppingHppPerUnit === 0 || isSaving}
+                  className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2.5 rounded-xl text-sm font-semibold transition-colors"
+                >
+                  <Save size={16} /> {editingToppingRecipeId ? 'Update HPP Topping' : 'Simpan HPP Topping'}
+                </button>
+
+                {savedToppingRecipes.length > 0 && (
+                  <div className="pt-4 border-t border-gray-100 dark:border-gray-800">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Topping tersimpan</p>
+                    <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                      {savedToppingRecipes.map(recipe => (
+                        <div key={recipe.id} className="rounded-xl bg-gray-50 dark:bg-gray-800/70 px-3 py-2">
+                          <div className="flex items-center gap-2">
+                            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-gray-800 dark:text-gray-100">{recipe.name}</span>
+                            <span className="shrink-0 text-xs font-semibold text-primary-600 dark:text-primary-400">
+                              Rp {Math.round(recipe.hpp_per_unit).toLocaleString('id-ID')}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleEditToppingRecipe(recipe)}
+                              className="shrink-0 p-1.5 rounded-lg text-gray-400 hover:text-primary-600 hover:bg-white dark:hover:bg-gray-900"
+                              aria-label={`Edit ${recipe.name}`}
+                            >
+                              <Edit2 size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteToppingRecipe(recipe)}
+                              className="shrink-0 p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-white dark:hover:bg-gray-900"
+                              aria-label={`Hapus ${recipe.name}`}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                          <p className="mt-0.5 text-xs text-gray-400">{recipe.items.length} bahan, update {new Date(recipe.updated_at).toLocaleDateString('id-ID')}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <Toast
         message={toast.message}

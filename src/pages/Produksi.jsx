@@ -12,7 +12,7 @@
 // Setelah membuat tabel, aktifkan RLS dan tambahkan policy sesuai kebutuhan.
 
 import { useMemo, useState, useEffect } from 'react';
-import { Plus, Trash2, X, Loader2, AlertCircle, ClipboardList, UtensilsCrossed, Edit2, PackageCheck } from 'lucide-react';
+import { Plus, Trash2, X, Loader2, AlertCircle, ClipboardList, UtensilsCrossed, Edit2, PackageCheck, Tags } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useStore } from '../store/useStore';
@@ -30,25 +30,46 @@ import {
 } from '../lib/dateUtils';
 import { reconcileProductStock, resolveProductionStocks } from '../lib/productStock';
 import { addActivity } from '../lib/activityLog';
+import { buildIngredientPriceMap, calculateIngredientUsageCost } from '../lib/ingredientCosts';
+import {
+  buildProductionToppings,
+  deleteProductionToppingsFromSupabase,
+  fetchProductionToppingMap,
+  getProductBaseHpp,
+  getProductionToppingCostPerUnit,
+  getProductionToppingTotalCost,
+  getProductionToppingsFromMap,
+  fetchToppingRecipes,
+  rememberProductBaseHpp,
+  saveProductionToppingsToSupabase,
+} from '../lib/toppings';
+
+const newToppingRow = () => ({ id: `row-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, ingredient_master_id: '', quantity_per_unit: 1, unit: 'gr' });
+const defaultProductionForm = () => ({
+  product_id: '',
+  quantity: 1,
+  failed: 0,
+  notes: '',
+  production_date: todayInputValue(),
+  production_time: currentTimeInputValue(),
+  toppings: [],
+});
 
 export default function Produksi() {
   const [logs, setLogs] = useState([]);
   const [filters, setFilters] = useState({ period: 'all', productId: '', status: 'all', startDate: '', endDate: '' });
   const [salesMap, setSalesMap] = useState({});
   const [products, setProducts] = useState([]);
+  const [ingredientMasters, setIngredientMasters] = useState([]);
+  const [ingredientPriceMap, setIngredientPriceMap] = useState({});
+  const [savedToppingRecipes, setSavedToppingRecipes] = useState([]);
+  const [productionToppingMap, setProductionToppingMap] = useState({});
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [tableExists, setTableExists] = useState(true);
   const [productionCheck, setProductionCheck] = useState({ status: 'idle', maxUnits: null, shortages: [] });
 
-  const [formData, setFormData] = useState({
-    product_id: '',
-    quantity: 1,
-    failed: 0,
-    notes: '',
-    production_date: todayInputValue(),
-    production_time: currentTimeInputValue(),
-  });
+  const [formData, setFormData] = useState(defaultProductionForm);
   const [editingLog, setEditingLog] = useState(null);
   const [formLoading, setFormLoading] = useState(false);
   const [error, setError] = useState('');
@@ -65,7 +86,27 @@ export default function Produksi() {
   useEffect(() => {
     fetchLogs();
     fetchProducts();
+    fetchIngredientMasters();
+    fetchIngredientPrices();
+    fetchSavedToppingRecipes();
+    fetchProductionToppings();
   }, []);
+
+  const fetchSavedToppingRecipes = async () => {
+    try {
+      setSavedToppingRecipes(await fetchToppingRecipes());
+    } catch {
+      setSavedToppingRecipes([]);
+    }
+  };
+
+  const fetchProductionToppings = async () => {
+    try {
+      setProductionToppingMap(await fetchProductionToppingMap());
+    } catch {
+      setProductionToppingMap({});
+    }
+  };
 
   useEffect(() => {
     const productId = location.state?.productId;
@@ -78,6 +119,7 @@ export default function Produksi() {
       notes: '',
       production_date: todayInputValue(),
       production_time: currentTimeInputValue(),
+      toppings: [],
     });
     setError('');
     setIsModalOpen(true);
@@ -93,7 +135,7 @@ export default function Produksi() {
       formData.product_id,
       (parseInt(formData.quantity) || 0) + (parseInt(formData.failed) || 0)
     );
-  }, [isModalOpen, formData.product_id, formData.quantity, formData.failed]);
+  }, [isModalOpen, formData.product_id, formData.quantity, formData.failed, formData.toppings, ingredientMasters]);
 
   const buildProductionAllocations = (productionLogs, salesRows) => {
     const allocations = {};
@@ -152,8 +194,19 @@ export default function Produksi() {
   };
 
   const fetchProducts = async () => {
-    const { data } = await supabase.from('products').select('id, name, stock').order('name');
+    const { data } = await supabase.from('products').select('id, name, stock, cost_price').order('name');
     setProducts(await resolveProductionStocks(data || [], { persist: true }));
+  };
+
+  const fetchIngredientMasters = async () => {
+    const { data } = await supabase.from('ingredient_masters').select('*').order('name');
+    setIngredientMasters(data || []);
+  };
+
+  const fetchIngredientPrices = async () => {
+    const { data } = await supabase.from('ingredients').select('*').order('purchase_date', { ascending: false });
+    if (!data) return;
+    setIngredientPriceMap(buildIngredientPriceMap(data));
   };
 
   const convertUnit = (qty, fromUnit, toUnit) => {
@@ -172,6 +225,36 @@ export default function Produksi() {
 
   const hasFiniteNumber = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
   const formatFixed = (value, digits = 2) => toFiniteNumber(value).toFixed(digits);
+  const getRecipeUnit = (master) => {
+    if (!master) return 'gr';
+    if (master.items_per_unit && master.base_unit) return master.base_unit;
+    if (master.unit === 'kg') return 'gr';
+    if (master.unit === 'liter') return 'ml';
+    return master.unit || 'gr';
+  };
+
+  const getToppingCostPerUnit = (master, unit, quantity) => {
+    if (!master) return 0;
+    const priceData = ingredientPriceMap[master.name.trim().toLowerCase()];
+    if (!priceData) return 0;
+    return calculateIngredientUsageCost(priceData, quantity, unit);
+  };
+
+  const getToppingUsageItems = (rows = formData.toppings) => (
+    rows
+      .map(row => {
+        const master = ingredientMasters.find(item => item.id === row.ingredient_master_id);
+        if (!master || !toFiniteNumber(row.quantity_per_unit)) return null;
+        return {
+          quantity_per_unit: toFiniteNumber(row.quantity_per_unit),
+          unit: row.unit || getRecipeUnit(master),
+          ingredient_master_id: master.id,
+          ingredient_masters: master,
+          isTopping: true,
+        };
+      })
+      .filter(Boolean)
+  );
 
   const getIngredientUsage = (item, batchQty) => {
     const master = item.ingredient_masters;
@@ -218,7 +301,8 @@ export default function Produksi() {
       .select('quantity_per_unit, unit, ingredient_masters(id, name, unit, current_stock, items_per_unit, base_unit)')
       .eq('product_id', productId);
 
-    if (!recipeItems || recipeItems.length === 0) {
+    const toppingItems = getToppingUsageItems();
+    if ((!recipeItems || recipeItems.length === 0) && toppingItems.length === 0) {
       setProductionCheck({ status: 'noRecipe', maxUnits: null, shortages: [] });
       return;
     }
@@ -226,7 +310,7 @@ export default function Produksi() {
     let maxUnits = Infinity;
     const shortages = [];
     const items = [];
-    recipeItems.forEach(item => {
+    [...(recipeItems || []), ...toppingItems].forEach(item => {
       const master = item.ingredient_masters;
       if (!master) return;
       const perUnitNeed = getIngredientStockDelta(item, 1);
@@ -235,7 +319,7 @@ export default function Produksi() {
       const currentStock = toFiniteNumber(master.current_stock);
       if (perUnitNeed > 0) maxUnits = Math.min(maxUnits, Math.floor(currentStock / perUnitNeed));
       items.push({
-        name: master.name,
+        name: item.isTopping ? `${master.name} (topping)` : master.name,
         need: totalNeed,
         stock: currentStock,
         remaining: currentStock - totalNeed,
@@ -247,7 +331,7 @@ export default function Produksi() {
       });
       if (currentStock < totalNeed) {
         shortages.push({
-          name: master.name,
+          name: item.isTopping ? `${master.name} (topping)` : master.name,
           need: totalNeed,
           stock: currentStock,
           unit: master.unit,
@@ -285,8 +369,23 @@ export default function Produksi() {
     return { hasRecipe: true, error: null };
   };
 
+  const adjustToppingStock = async (toppingRows, batchQty, sign) => {
+    const toppingItems = getToppingUsageItems(toppingRows);
+    for (const item of toppingItems) {
+      const delta = getIngredientStockDelta(item, batchQty);
+      const { error: adjustError } = await supabase.rpc('adjust_ingredient_stock', {
+        p_id: item.ingredient_master_id,
+        p_delta: delta * sign,
+      });
+      if (adjustError) return { hasToppings: true, error: adjustError };
+    }
+    return { hasToppings: toppingItems.length > 0, error: null };
+  };
+
   const deductIngredientStock  = (productId, qty) => adjustIngredientStock(productId, qty, -1);
   const restoreIngredientStock = (productId, qty) => adjustIngredientStock(productId, qty, +1);
+  const deductToppingStock = (rows, qty) => adjustToppingStock(rows, qty, -1);
+  const restoreToppingStock = (rows, qty) => adjustToppingStock(rows, qty, +1);
 
   const updateProductStock = async (productId, delta) => {
     if (!productId || !delta) return { error: null, data: [{ skipped: true }] };
@@ -303,16 +402,69 @@ export default function Produksi() {
       .select();
   };
 
+  const handleAddProductionTopping = () => {
+    if (ingredientMasters.length === 0) {
+      setToast({ message: 'Belum ada bahan baku. Tambahkan bahan dulu di Modal Bahan.', type: 'error' });
+      return;
+    }
+    setFormData(data => ({ ...data, toppings: [...data.toppings, newToppingRow()] }));
+  };
+
+  const handleProductionToppingChange = (rowId, field, value) => {
+    setFormData(data => ({
+      ...data,
+      toppings: data.toppings.map(row => {
+        if (row.id !== rowId) return row;
+        if (field !== 'ingredient_master_id') return { ...row, [field]: value };
+        const master = ingredientMasters.find(item => item.id === value);
+        return { ...row, ingredient_master_id: value, unit: getRecipeUnit(master) };
+      }),
+    }));
+  };
+
+  const handleRemoveProductionTopping = (rowId) => {
+    setFormData(data => ({ ...data, toppings: data.toppings.filter(row => row.id !== rowId) }));
+  };
+
+  const handleApplySavedToppingRecipe = (recipeId) => {
+    const recipe = savedToppingRecipes.find(item => item.id === recipeId);
+    if (!recipe) return;
+
+    const masterByName = Object.fromEntries(
+      ingredientMasters.map(item => [item.name.trim().toLowerCase(), item])
+    );
+    const unmatched = [];
+    const rows = recipe.items.map(item => {
+      const master = masterByName[item.ingredient_key || item.ingredient_name.trim().toLowerCase()];
+      if (!master) {
+        unmatched.push(item.ingredient_name);
+        return null;
+      }
+      return {
+        id: `row-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        ingredient_master_id: master.id,
+        quantity_per_unit: item.quantity_per_unit,
+        unit: item.unit || getRecipeUnit(master),
+      };
+    }).filter(Boolean);
+
+    if (rows.length === 0) {
+      setToast({ message: 'Template topping belum cocok dengan master bahan baku.', type: 'error' });
+      return;
+    }
+
+    setFormData(data => ({ ...data, toppings: [...data.toppings, ...rows] }));
+    setToast({
+      message: unmatched.length > 0
+        ? `Template dipakai, tapi ${unmatched.length} bahan belum ada di master bahan.`
+        : `Template ${recipe.name} ditambahkan ke produksi.`,
+      type: unmatched.length > 0 ? 'info' : 'success',
+    });
+  };
+
   const resetForm = () => {
     setEditingLog(null);
-    setFormData({
-      product_id: '',
-      quantity: 1,
-      failed: 0,
-      notes: '',
-      production_date: todayInputValue(),
-      production_time: currentTimeInputValue(),
-    });
+    setFormData(defaultProductionForm());
     setError('');
   };
 
@@ -326,6 +478,12 @@ export default function Produksi() {
       notes: log.notes || '',
       production_date: dateToInputValue(productionDate),
       production_time: timeInputValue(productionDate),
+      toppings: getProductionToppingsFromMap(productionToppingMap, log.id).map(item => ({
+        id: `row-${item.ingredient_master_id}`,
+        ingredient_master_id: item.ingredient_master_id,
+        quantity_per_unit: item.quantity_per_unit,
+        unit: item.unit,
+      })),
     });
     setError('');
     setIsModalOpen(true);
@@ -345,6 +503,7 @@ export default function Produksi() {
     const newBawa   = parseInt(formData.quantity) || 0;
     const newFailed = parseInt(formData.failed)  || 0;
     const newTotal  = newBawa + newFailed;
+    const productionToppings = buildProductionToppings(formData.toppings, ingredientMasters, getToppingCostPerUnit);
 
     if (newBawa <= 0 || newFailed < 0) {
       setError('Jumlah produksi harus valid. Berhasil minimal 1 pcs dan gagal tidak boleh minus.');
@@ -363,6 +522,7 @@ export default function Produksi() {
       const oldBawa   = editingLog.quantity;
       const oldFailed = editingLog.failed || 0;
       const oldTotal  = oldBawa + oldFailed;
+      const oldToppings = getProductionToppingsFromMap(productionToppingMap, editingLog.id);
 
       const { error: updateError } = await supabase.from('production_logs').update({
         product_id: formData.product_id,
@@ -377,6 +537,7 @@ export default function Produksi() {
         setFormLoading(false);
         return;
       }
+      await saveProductionToppingsToSupabase(editingLog.id, productionToppings);
 
       const oldKonsumsi = editingLog.konsumsi || 0;
       const sameProduct = editingLog.product_id === formData.product_id;
@@ -417,15 +578,11 @@ export default function Produksi() {
         return;
       }
 
-      let ingredientAdjustment = { error: null };
-      if (sameProduct) {
-        const totalDiff = newTotal - oldTotal;
-        if (totalDiff > 0) ingredientAdjustment = await deductIngredientStock(formData.product_id, totalDiff);
-        else if (totalDiff < 0) ingredientAdjustment = await restoreIngredientStock(formData.product_id, Math.abs(totalDiff));
-      } else {
-        const restoreResult = await restoreIngredientStock(editingLog.product_id, oldTotal);
-        ingredientAdjustment = restoreResult.error ? restoreResult : await deductIngredientStock(formData.product_id, newTotal);
-      }
+      const restoreRecipeResult = await restoreIngredientStock(editingLog.product_id, oldTotal);
+      const restoreToppingResult = await restoreToppingStock(oldToppings, oldBawa);
+      const deductRecipeResult = restoreRecipeResult.error ? restoreRecipeResult : await deductIngredientStock(formData.product_id, newTotal);
+      const deductToppingResult = restoreToppingResult.error ? restoreToppingResult : await deductToppingStock(productionToppings, newBawa);
+      const ingredientAdjustment = deductRecipeResult.error ? deductRecipeResult : deductToppingResult;
 
       await reconcileProductStock(editingLog.product_id, { force: true });
       await reconcileProductStock(formData.product_id, { force: true });
@@ -437,28 +594,36 @@ export default function Produksi() {
       });
     } else {
       // ── MODE TAMBAH ──
-      const { error: insertError } = await supabase.from('production_logs').insert([{
-        product_id: formData.product_id,
-        quantity: newBawa,
-        failed: newFailed,
-        notes: formData.notes || null,
-        created_by: user?.id,
-        production_date: dateTimeInputToLocalISOString(formData.production_date, formData.production_time),
-      }]);
+      const productionId = crypto.randomUUID();
+      const { error: insertError } = await supabase
+        .from('production_logs')
+        .insert([{
+          id: productionId,
+          product_id: formData.product_id,
+          quantity: newBawa,
+          failed: newFailed,
+          notes: formData.notes || null,
+          created_by: user?.id,
+          production_date: dateTimeInputToLocalISOString(formData.production_date, formData.production_time),
+        }]);
 
       if (insertError) {
         setError(friendlyError(insertError));
         setFormLoading(false);
         return;
       }
+      await saveProductionToppingsToSupabase(productionId, productionToppings);
 
       const { data: stockUpdated } = await updateProductStock(formData.product_id, newBawa);
 
       const ingredientAdjustment = await deductIngredientStock(formData.product_id, newTotal);
+      const toppingAdjustment = await deductToppingStock(productionToppings, newBawa);
       if (!stockUpdated || stockUpdated.length === 0) {
         setToast({ message: 'Produksi tersimpan tapi stok produk gagal bertambah. Jalankan SQL: CREATE POLICY "Allow update products" ON products FOR UPDATE TO authenticated USING (true) WITH CHECK (true);', type: 'error' });
       } else if (ingredientAdjustment.error) {
         setToast({ message: `Produksi tersimpan tapi stok bahan gagal dikurangi: ${friendlyError(ingredientAdjustment.error)}`, type: 'error' });
+      } else if (toppingAdjustment.error) {
+        setToast({ message: `Produksi tersimpan tapi stok topping gagal dikurangi: ${friendlyError(toppingAdjustment.error)}`, type: 'error' });
       } else if (!ingredientAdjustment.hasRecipe) {
         setToast({ message: 'Produksi tersimpan. Resep belum diatur — stok bahan tidak dikurangi.', type: 'info' });
       } else {
@@ -466,16 +631,27 @@ export default function Produksi() {
       }
     }
 
+    const productForHpp = products.find(product => product.id === formData.product_id);
+    if (productForHpp) {
+      const baseHpp = rememberProductBaseHpp(productForHpp);
+      const toppingHpp = getProductionToppingCostPerUnit(productionToppings);
+      await supabase
+        .from('products')
+        .update({ cost_price: Math.round(baseHpp + toppingHpp) })
+        .eq('id', formData.product_id);
+    }
+
     await reconcileProductStock(formData.product_id, { force: true });
     addActivity({
       type: 'production',
       title: editingLog ? 'Catatan produksi diperbarui' : 'Produksi baru dicatat',
-      description: `${selectedProduct?.name || 'Produk'} bawa ${newBawa} pcs${newFailed > 0 ? `, gagal ${newFailed} pcs` : ''}.`,
+      description: `${selectedProduct?.name || 'Produk'} bawa ${newBawa} pcs${newFailed > 0 ? `, gagal ${newFailed} pcs` : ''}${productionToppings.length ? `, topping ${productionToppings.length} item` : ''}.`,
     });
     setIsModalOpen(false);
     resetForm();
     fetchLogs();
     fetchProducts();
+    fetchProductionToppings();
     setFormLoading(false);
   };
 
@@ -534,16 +710,26 @@ export default function Produksi() {
       setToast({ message: `Gagal mengembalikan stok bahan: ${friendlyError(restoreResult.error)}`, type: 'error' });
       return;
     }
+    const deletedToppings = getProductionToppingsFromMap(productionToppingMap, id);
+    const toppingRestore = await restoreToppingStock(deletedToppings, quantity);
+    if (toppingRestore.error) {
+      setToast({ message: `Gagal mengembalikan stok topping: ${friendlyError(toppingRestore.error)}`, type: 'error' });
+      return;
+    }
 
     const { error: deleteError } = await supabase.from('production_logs').delete().eq('id', id);
     if (deleteError) {
       if (restoreResult.hasRecipe) {
         await deductIngredientStock(productId, total);
       }
+      if (toppingRestore.hasToppings) {
+        await deductToppingStock(deletedToppings, quantity);
+      }
       setToast({ message: 'Gagal menghapus catatan produksi.', type: 'error' });
       return;
     }
 
+    await deleteProductionToppingsFromSupabase(id);
     await reconcileProductStock(productId, { force: true });
     setToast({
       message: restoreResult.hasRecipe
@@ -558,6 +744,7 @@ export default function Produksi() {
     });
     fetchLogs();
     fetchProducts();
+    fetchProductionToppings();
   };
 
   const today = new Date();
@@ -571,6 +758,11 @@ export default function Produksi() {
   const formFailedQty = parseInt(formData.failed) || 0;
   const formTotalQty = formSuccessQty + formFailedQty;
   const productStockAfter = selectedProduct ? (selectedProduct.stock || 0) + formSuccessQty : null;
+  const selectedProductionToppings = buildProductionToppings(formData.toppings, ingredientMasters, getToppingCostPerUnit);
+  const toppingCostPerUnit = getProductionToppingCostPerUnit(selectedProductionToppings);
+  const toppingTotalCost = getProductionToppingTotalCost(selectedProductionToppings, formSuccessQty);
+  const baseProductHpp = selectedProduct ? getProductBaseHpp(selectedProduct) : 0;
+  const estimatedProductHpp = baseProductHpp + toppingCostPerUnit;
   const getBatchStatus = (sisaBatch, failed = 0, konsumsi = 0) => {
     if (sisaBatch <= 0) return { label: 'Habis', className: 'bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300' };
     if (failed > 0) return { label: 'Ada gagal', className: 'bg-rose-50 text-rose-700 dark:bg-rose-900/20 dark:text-rose-300' };
@@ -666,6 +858,20 @@ export default function Produksi() {
         </div>
       </div>
 
+      <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 p-4">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 rounded-xl bg-primary-50 dark:bg-primary-900/20 p-2 text-primary-600 dark:text-primary-400">
+            <Tags size={18} />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Topping dari bahan baku</h2>
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Pilih topping langsung dari daftar bahan baku saat catat produksi. HPP dan stok topping mengikuti data pembelian bahan.
+            </p>
+          </div>
+        </div>
+      </div>
+
       {/* Tabel */}
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
         <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 space-y-3">
@@ -753,6 +959,7 @@ export default function Produksi() {
                   const konsumsi = log.konsumsi || 0;
                   const sisaBatch = allocation.remaining ?? Math.max(0, (log.quantity || 0) - konsumsi - terjual);
                   const batchStatus = getBatchStatus(sisaBatch, log.failed || 0, konsumsi);
+                  const logToppings = getProductionToppingsFromMap(productionToppingMap, log.id);
                   return (
                   <tr key={log.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="p-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
@@ -766,6 +973,15 @@ export default function Produksi() {
                       <div className="text-xs mt-0.5 text-gray-500 dark:text-gray-400">
                         Stok jual total: {productStockById[log.product_id] ?? 0} pcs
                       </div>
+                      {logToppings.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {logToppings.map(item => (
+                            <span key={`${log.id}-${item.ingredient_master_id}`} className="inline-flex rounded-md bg-primary-50 dark:bg-primary-900/20 px-1.5 py-0.5 text-[11px] font-medium text-primary-700 dark:text-primary-300">
+                              {item.name} {formatFixed(item.quantity_per_unit)} {item.unit}/pcs
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td className="p-4 text-right font-bold text-primary-600 dark:text-primary-400">
                       {log.quantity} pcs
@@ -909,7 +1125,7 @@ export default function Produksi() {
       {/* Modal Tambah */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-start justify-center p-4 sm:p-6 bg-black/50 backdrop-blur-sm overflow-y-auto">
-          <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 w-full max-w-md my-8 sm:my-auto">
+          <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 w-full max-w-2xl my-8 sm:my-auto">
             <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-bold text-gray-900 dark:text-white">
                 {editingLog ? 'Edit Produksi' : 'Catat Produksi'}
@@ -1011,6 +1227,118 @@ export default function Produksi() {
                   Total dibuat: {formTotalQty} pcs. Bahan dikurangi dari {formTotalQty} pcs. Stok bertambah {formSuccessQty} pcs.
                 </p>
               )}
+
+              <div className="rounded-xl border border-gray-100 dark:border-gray-800 bg-gray-50/70 dark:bg-gray-800/40 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Topping produksi</label>
+                    <p className="mt-0.5 text-xs text-gray-400">Isi jika batch ini memang memakai topping.</p>
+                  </div>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    {savedToppingRecipes.length > 0 && (
+                      <select
+                        value=""
+                        onChange={(e) => handleApplySavedToppingRecipe(e.target.value)}
+                        className="max-w-44 px-3 py-2 bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-lg text-xs font-semibold text-gray-600 dark:text-gray-300 outline-none"
+                        aria-label="Pakai template topping"
+                      >
+                        <option value="">Pakai template</option>
+                        {savedToppingRecipes.map(recipe => (
+                          <option key={recipe.id} value={recipe.id}>{recipe.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleAddProductionTopping}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-white dark:bg-gray-900 px-3 py-2 text-xs font-semibold text-primary-600 hover:text-primary-700 border border-gray-100 dark:border-gray-700"
+                    >
+                      <Plus size={14} /> Tambah
+                    </button>
+                  </div>
+                </div>
+
+                {formData.toppings.length === 0 ? (
+                  <p className="mt-3 text-xs text-gray-400">Batch ini tanpa topping.</p>
+                ) : (
+                  <div className="mt-3 space-y-2">
+                    {formData.toppings.map(row => {
+                      const selectedTopping = ingredientMasters.find(item => item.id === row.ingredient_master_id);
+                      const selectedCost = selectedTopping
+                        ? getToppingCostPerUnit(selectedTopping, row.unit || getRecipeUnit(selectedTopping), row.quantity_per_unit)
+                        : 0;
+                      return (
+                        <div key={row.id} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_6rem_5rem_auto] gap-2 items-center">
+                          <select
+                            value={row.ingredient_master_id}
+                            onChange={(e) => handleProductionToppingChange(row.id, 'ingredient_master_id', e.target.value)}
+                            className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:border-primary-500 outline-none"
+                          >
+                            <option value="">Pilih bahan topping</option>
+                            {ingredientMasters.map(item => (
+                              <option key={item.id} value={item.id}>
+                                {item.name} - stok {formatFixed(item.current_stock)} {item.unit}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={row.quantity_per_unit}
+                            onChange={(e) => handleProductionToppingChange(row.id, 'quantity_per_unit', e.target.value === '' ? '' : parseFloat(e.target.value))}
+                            className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:border-primary-500 outline-none"
+                            aria-label="Qty topping per pcs"
+                          />
+                          <select
+                            value={row.unit}
+                            onChange={(e) => handleProductionToppingChange(row.id, 'unit', e.target.value)}
+                            className="w-full px-2 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:border-primary-500 outline-none"
+                            aria-label="Unit topping"
+                          >
+                            <option value="gr">gr</option>
+                            <option value="kg">kg</option>
+                            <option value="ml">ml</option>
+                            <option value="liter">L</option>
+                            <option value="pcs">pcs</option>
+                            <option value="lembar">lembar</option>
+                            <option value="bungkus">bungkus</option>
+                            <option value="botol">botol</option>
+                            <option value="pack">pack</option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveProductionTopping(row.id)}
+                            className="p-2 text-gray-400 hover:text-red-500 rounded-lg"
+                            aria-label="Hapus topping"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                          {selectedTopping && (
+                            <p className="sm:col-span-4 text-xs text-gray-500">
+                              Dipakai {row.quantity_per_unit || 0} {row.unit || getRecipeUnit(selectedTopping)} per pcs, HPP sekitar Rp {Math.round(selectedCost).toLocaleString('id-ID')} per pcs.
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {selectedProductionToppings.length > 0 && (
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                    <div className="rounded-lg bg-white dark:bg-gray-900 px-3 py-2 text-gray-500">
+                      HPP topping / pcs: <span className="font-semibold text-amber-600 dark:text-amber-400">Rp {toppingCostPerUnit.toLocaleString('id-ID')}</span>
+                    </div>
+                    <div className="rounded-lg bg-white dark:bg-gray-900 px-3 py-2 text-gray-500">
+                      Total topping: <span className="font-semibold text-amber-600 dark:text-amber-400">Rp {toppingTotalCost.toLocaleString('id-ID')}</span>
+                    </div>
+                    <div className="rounded-lg bg-white dark:bg-gray-900 px-3 py-2 text-gray-500">
+                      HPP produk: <span className="font-semibold text-primary-600 dark:text-primary-400">Rp {Math.round(estimatedProductHpp).toLocaleString('id-ID')}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {selectedProduct && formTotalQty > 0 && (
                 <div className="rounded-2xl border border-primary-100 dark:border-primary-900/30 bg-primary-50/70 dark:bg-primary-900/10 p-3 space-y-3">

@@ -8,6 +8,7 @@ import { uploadToImgBB } from '../lib/uploadImgBB';
 import { format } from 'date-fns';
 import { id as localeId } from 'date-fns/locale';
 import { dateInputToLocalISOString, todayInputValue } from '../lib/dateUtils';
+import { convertIngredientQuantity } from '../lib/ingredientCosts';
 
 export default function ModalBahan() {
   const [activeTab, setActiveTab] = useState('riwayat');
@@ -217,7 +218,7 @@ export default function ModalBahan() {
     for (const item of cart) {
       const { data: master } = await supabase
         .from('ingredient_masters')
-        .select('id, current_stock')
+        .select('id, current_stock, unit')
         .eq('name', item.name.trim())
         .maybeSingle();
 
@@ -225,10 +226,11 @@ export default function ModalBahan() {
       const baseUnit = itemsPerUnit ? item.base_unit : null;
 
       if (master) {
+        const stockDelta = convertIngredientQuantity(item.quantity, item.unit, master.unit);
         await supabase
           .from('ingredient_masters')
           .update({
-            current_stock: (master.current_stock || 0) + item.quantity,
+            current_stock: (master.current_stock || 0) + stockDelta,
             ...(itemsPerUnit && { items_per_unit: itemsPerUnit, base_unit: baseUnit }),
           })
           .eq('id', master.id);
@@ -265,13 +267,14 @@ export default function ModalBahan() {
     if (item) {
       const { data: master } = await supabase
         .from('ingredient_masters')
-        .select('id, current_stock')
+        .select('id, current_stock, unit')
         .eq('name', item.name.trim())
         .maybeSingle();
       if (master) {
+        const stockDelta = convertIngredientQuantity(item.quantity, item.unit, master.unit);
         await supabase
           .from('ingredient_masters')
-          .update({ current_stock: Math.max(0, (master.current_stock || 0) - item.quantity) })
+          .update({ current_stock: Math.max(0, (master.current_stock || 0) - stockDelta) })
           .eq('id', master.id);
       }
     }
@@ -330,18 +333,19 @@ export default function ModalBahan() {
       if (oldName.toLowerCase() === newName.toLowerCase()) {
         const { data: master } = await supabase
           .from('ingredient_masters')
-          .select('id, current_stock')
+          .select('id, current_stock, unit')
           .eq('name', newName)
           .maybeSingle();
 
         if (master) {
-          const qtyDiff = editFormData.quantity - originalEditQty;
+          const oldQty = convertIngredientQuantity(originalEditQty, originalEditItem?.unit, master.unit);
+          const newQty = convertIngredientQuantity(editFormData.quantity, editFormData.unit, master.unit);
+          const qtyDiff = newQty - oldQty;
           await supabase
             .from('ingredient_masters')
             .update({
               current_stock: Math.max(0, (master.current_stock || 0) + qtyDiff),
               category: editFormData.category,
-              unit: editFormData.unit,
               items_per_unit: itemsPerUnit,
               base_unit: itemsPerUnit ? editFormData.base_unit : null,
             })
@@ -350,28 +354,29 @@ export default function ModalBahan() {
       } else {
         const { data: oldMaster } = await supabase
           .from('ingredient_masters')
-          .select('id, current_stock')
+          .select('id, current_stock, unit')
           .eq('name', oldName)
           .maybeSingle();
         if (oldMaster) {
+          const oldStockDelta = convertIngredientQuantity(originalEditQty, originalEditItem?.unit, oldMaster.unit);
           await supabase
             .from('ingredient_masters')
-            .update({ current_stock: Math.max(0, (oldMaster.current_stock || 0) - originalEditQty) })
+            .update({ current_stock: Math.max(0, (oldMaster.current_stock || 0) - oldStockDelta) })
             .eq('id', oldMaster.id);
         }
 
         const { data: newMaster } = await supabase
           .from('ingredient_masters')
-          .select('id, current_stock')
+          .select('id, current_stock, unit')
           .eq('name', newName)
           .maybeSingle();
         if (newMaster) {
+          const newStockDelta = convertIngredientQuantity(editFormData.quantity, editFormData.unit, newMaster.unit);
           await supabase
             .from('ingredient_masters')
             .update({
-              current_stock: (newMaster.current_stock || 0) + editFormData.quantity,
+              current_stock: (newMaster.current_stock || 0) + newStockDelta,
               category: editFormData.category,
-              unit: editFormData.unit,
               items_per_unit: itemsPerUnit,
               base_unit: itemsPerUnit ? editFormData.base_unit : null,
             })

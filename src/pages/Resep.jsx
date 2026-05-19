@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase';
 import Toast from '../components/ui/Toast';
 import { friendlyError } from '../lib/errorUtils';
 import { addActivity } from '../lib/activityLog';
+import { buildIngredientPriceMap, calculateIngredientUsageCost } from '../lib/ingredientCosts';
 
 const STOCK_ADJUSTMENT_REASONS = [
   { value: 'trial_resep', label: 'Trial resep' },
@@ -178,40 +179,7 @@ export default function Resep() {
   const fetchIngredientPrices = async () => {
     const { data } = await supabase.from('ingredients').select('*').order('purchase_date', { ascending: false });
     if (!data) return;
-    // Weighted average price per base unit, dikelompokkan per nama bahan
-    const groups = {};
-    data.forEach(ing => {
-      const key = ing.name.trim().toLowerCase();
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(ing);
-    });
-    const map = {};
-    Object.entries(groups).forEach(([key, entries]) => {
-      let totalCost = 0, totalQtyBase = 0;
-      entries.forEach(ing => {
-        let pricePerBase, qtyBase;
-        if (ing.items_per_unit && ing.base_unit) {
-          pricePerBase = ing.unit_price / ing.items_per_unit;
-          qtyBase = ing.quantity * ing.items_per_unit;
-        } else if (ing.unit === 'kg') {
-          qtyBase = ing.quantity * 1000;
-          pricePerBase = qtyBase > 0 ? ing.unit_price / qtyBase : 0;
-        } else if (ing.unit === 'liter') {
-          qtyBase = ing.quantity * 1000;
-          pricePerBase = qtyBase > 0 ? ing.unit_price / qtyBase : 0;
-        } else if (ing.unit === 'gr' || ing.unit === 'ml') {
-          // unit_price is total batch price (e.g. 35000 for 500gr), not per-gram
-          pricePerBase = ing.unit_price / ing.quantity; qtyBase = ing.quantity;
-        } else {
-          pricePerBase = ing.unit_price; qtyBase = ing.quantity;
-        }
-        totalCost += pricePerBase * qtyBase;
-        totalQtyBase += qtyBase;
-      });
-      // simpan harga per unit terkecil (gr/ml/pcs)
-      map[key] = { pricePerBase: totalQtyBase > 0 ? totalCost / totalQtyBase : 0, template: entries[0] };
-    });
-    setIngredientPriceMap(map);
+    setIngredientPriceMap(buildIngredientPriceMap(data));
   };
 
   // Hitung biaya per pcs produk untuk satu bahan resep
@@ -222,25 +190,7 @@ export default function Resep() {
     const priceData = ingredientPriceMap[key];
     if (!priceData) return 0;
 
-    const { pricePerBase, template } = priceData;
-    const qty = recipeItem.quantity_per_unit;
-    const unit = recipeItem.unit;
-
-    // Konversi qty resep ke unit terkecil yang sama dengan pricePerBase
-    let baseUnit;
-    if (template.items_per_unit && template.base_unit) baseUnit = template.base_unit;
-    else if (template.unit === 'kg') baseUnit = 'gr';
-    else if (template.unit === 'liter') baseUnit = 'ml';
-    else baseUnit = template.unit;
-
-    let qtyInBase = qty;
-    if (unit === baseUnit) qtyInBase = qty;
-    else if (unit === 'kg' && baseUnit === 'gr') qtyInBase = qty * 1000;
-    else if (unit === 'gr' && baseUnit === 'kg') qtyInBase = qty / 1000;
-    else if (unit === 'liter' && baseUnit === 'ml') qtyInBase = qty * 1000;
-    else if (unit === 'ml' && baseUnit === 'liter') qtyInBase = qty / 1000;
-
-    return pricePerBase * qtyInBase;
+    return calculateIngredientUsageCost(priceData, recipeItem.quantity_per_unit, recipeItem.unit);
   };
 
   const fetchRecipe = async (productId) => {
