@@ -224,13 +224,17 @@ export default function KalkulatorHPP() {
     setMargin(50);
     setOverhead(5);
     setBatchSize(1);
+    clearToppingDraft();
+    // selectedProductId sengaja tidak di-reset agar tidak perlu pilih ulang
+  };
+
+  const clearToppingDraft = () => {
     setToppingName('');
     setToppingItems([{ id: Date.now() + 1, ingredient_id: '', used_qty: '', used_unit: 'gr' }]);
     setToppingBatchSize(1);
     setToppingOverhead(5);
     setToppingMargin(50);
     setEditingToppingRecipeId('');
-    // selectedProductId sengaja tidak di-reset agar tidak perlu pilih ulang
   };
 
   const fetchIngredients = async () => {
@@ -1005,6 +1009,16 @@ export default function KalkulatorHPP() {
                 >
                   <Save size={16} /> {editingToppingRecipeId ? 'Update HPP Topping' : 'Simpan HPP Topping'}
                 </button>
+
+                {editingToppingRecipeId && (
+                  <button
+                    type="button"
+                    onClick={clearToppingDraft}
+                    className="w-full flex items-center justify-center gap-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 py-2 rounded-xl text-xs font-medium transition-colors"
+                  >
+                    <Plus size={14} /> Topping Baru
+                  </button>
+                )}
 
                 {savedToppingRecipes.length > 0 && (
                   <div className="pt-4 border-t border-gray-100 dark:border-gray-800">

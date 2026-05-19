@@ -206,13 +206,16 @@ export default function Penjualan() {
   
   // Form State
   const [products, setProducts] = useState([]);
+  const [productToppingOptions, setProductToppingOptions] = useState([]);
+  const [toppingBatchStock, setToppingBatchStock] = useState(null);
   const [formData, setFormData] = useState({
     product_id: '',
     quantity: 1,
     payment_method: 'Cash',
     customer_name: '',
     transaction_date: todayInputValue(),
-    transaction_time: currentTimeInputValue()
+    transaction_time: currentTimeInputValue(),
+    topping_recipe_id: '',
   });
   const [editingTransaction, setEditingTransaction] = useState(null);
   const [formLoading, setFormLoading] = useState(false);
@@ -224,12 +227,21 @@ export default function Penjualan() {
   const openConfirm = (title, message, onConfirm) => setConfirmDialog({ open: true, title, message, onConfirm });
   const closeConfirm = () => setConfirmDialog(d => ({ ...d, open: false }));
   const selectedProduct = products.find(p => p.id === formData.product_id);
+  const toppingPricePerUnit = 0;
   const previewQty = parseInt(formData.quantity) || 0;
-  const previewTotal = selectedProduct ? selectedProduct.selling_price * previewQty : 0;
+  const previewTotal = selectedProduct ? (selectedProduct.selling_price + toppingPricePerUnit) * previewQty : 0;
   const editStockCredit = editingTransaction && editingTransaction.product_id === formData.product_id ? editingTransaction.quantity : 0;
-  const availableForForm = selectedProduct ? (selectedProduct.stock || 0) + editStockCredit : 0;
+  const editToppingCredit = editingTransaction && editingTransaction.topping_name === formData.topping_name ? editingTransaction.quantity : 0;
+  const toppingAvailable = toppingBatchStock !== null ? toppingBatchStock + editToppingCredit : null;
+  const availableForForm = selectedProduct
+    ? toppingAvailable !== null
+      ? toppingAvailable
+      : (selectedProduct.stock || 0) + editStockCredit
+    : 0;
   const formStockWarning = selectedProduct && previewQty > availableForForm
-    ? `Stok ${selectedProduct.name} hanya ${availableForForm} pcs. Kurangi qty sebelum menyimpan.`
+    ? toppingAvailable !== null
+      ? `Stok varian "${formData.topping_name}" hanya ${toppingAvailable} pcs. Kurangi qty atau ganti topping.`
+      : `Stok ${selectedProduct.name} hanya ${availableForForm} pcs. Kurangi qty sebelum menyimpan.`
     : '';
   const selectedQuickProduct = products.find(p => p.id === quickSale.product_id);
   const quickSaleQty = parseInt(quickSale.quantity) || 0;
@@ -308,6 +320,74 @@ export default function Penjualan() {
     setProducts(await resolveProductionStocks(data || [], { persist: true }));
   };
 
+  const fetchProductToppingOptions = async (productId) => {
+    if (!productId) { setProductToppingOptions([]); return; }
+    const { data: logs } = await supabase
+      .from('production_logs')
+      .select('id')
+      .eq('product_id', productId)
+      .order('production_date', { ascending: false })
+      .limit(30);
+    if (!logs || logs.length === 0) { setProductToppingOptions([]); return; }
+    const logIds = logs.map(l => l.id);
+    const { data: toppings } = await supabase
+      .from('production_log_toppings')
+      .select('production_log_id, name')
+      .in('production_log_id', logIds);
+    const groups = {};
+    (toppings || []).forEach(t => {
+      if (!groups[t.production_log_id]) groups[t.production_log_id] = [];
+      groups[t.production_log_id].push(t.name);
+    });
+    const seen = new Set();
+    const options = [];
+    Object.values(groups).forEach(names => {
+      const combo = names.sort().join(', ');
+      if (!seen.has(combo)) { seen.add(combo); options.push(combo); }
+    });
+    setProductToppingOptions(options);
+  };
+
+  const fetchToppingBatchStock = async (productId, toppingCombo) => {
+    if (!productId || !toppingCombo) { setToppingBatchStock(null); return; }
+
+    const { data: logs } = await supabase
+      .from('production_logs')
+      .select('id, quantity, konsumsi')
+      .eq('product_id', productId);
+    const logIds = (logs || []).map(l => l.id);
+    if (!logIds.length) { setToppingBatchStock(0); return; }
+
+    const { data: toppings } = await supabase
+      .from('production_log_toppings')
+      .select('production_log_id, name')
+      .in('production_log_id', logIds);
+
+    const logToppingMap = {};
+    (toppings || []).forEach(t => {
+      if (!logToppingMap[t.production_log_id]) logToppingMap[t.production_log_id] = [];
+      logToppingMap[t.production_log_id].push(t.name);
+    });
+
+    const matchingLogs = (logs || []).filter(log => {
+      const combo = (logToppingMap[log.id] || []).sort().join(', ');
+      return combo === toppingCombo;
+    });
+
+    const totalProduced = matchingLogs.reduce(
+      (sum, log) => sum + Math.max(0, (log.quantity || 0) - (log.konsumsi || 0)), 0
+    );
+
+    const { data: sold } = await supabase
+      .from('sales')
+      .select('quantity')
+      .eq('product_id', productId)
+      .eq('topping_name', toppingCombo);
+
+    const totalSold = (sold || []).reduce((sum, s) => sum + (s.quantity || 0), 0);
+    setToppingBatchStock(Math.max(0, totalProduced - totalSold));
+  };
+
   const updateProductStock = async (productId, delta) => {
     if (!delta) return { error: null };
     const { data: product, error: fetchError } = await supabase
@@ -324,7 +404,9 @@ export default function Penjualan() {
 
   const openAdd = () => {
     setEditingTransaction(null);
-    setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue(), transaction_time: currentTimeInputValue() });
+    setProductToppingOptions([]);
+    setToppingBatchStock(null);
+    setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue(), transaction_time: currentTimeInputValue(), topping_recipe_id: '', topping_name: '' });
     setError('');
     setIsModalOpen(true);
   };
@@ -338,8 +420,12 @@ export default function Penjualan() {
       payment_method: trx.payment_method,
       customer_name: trx.customer_name || '',
       transaction_date: dateToInputValue(transactionDate),
-      transaction_time: timeInputValue(transactionDate)
+      transaction_time: timeInputValue(transactionDate),
+      topping_recipe_id: '',
+      topping_name: trx.topping_name || '',
     });
+    fetchProductToppingOptions(trx.product_id);
+    if (trx.topping_name) fetchToppingBatchStock(trx.product_id, trx.topping_name);
     setError('');
     setIsModalOpen(true);
   };
@@ -383,6 +469,7 @@ export default function Penjualan() {
       payment_method: formData.payment_method,
       customer_name: formData.customer_name || null,
       transaction_date: dateTimeInputToLocalISOString(formData.transaction_date, formData.transaction_time),
+      topping_name: formData.topping_name || null,
     };
 
     let dbError;
@@ -434,7 +521,8 @@ export default function Penjualan() {
       });
       // INSERT: trigger tr_reduce_stock otomatis mengurangi stok — tidak perlu manual
       setIsModalOpen(false);
-      setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue(), transaction_time: currentTimeInputValue() });
+      setProductToppingOptions([]);
+      setFormData({ product_id: '', quantity: 1, payment_method: 'Cash', customer_name: '', transaction_date: todayInputValue(), transaction_time: currentTimeInputValue(), topping_recipe_id: '', topping_name: '' });
       setToast({ message: editingTransaction ? 'Transaksi berhasil diperbarui!' : 'Penjualan berhasil dicatat!', type: 'success' });
       fetchTransactions();
       fetchProducts();
@@ -558,6 +646,7 @@ export default function Penjualan() {
           <h1>Struk Penjualan</h1>
           <p class="muted">${new Date(trx.transaction_date).toLocaleString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>
           <div class="row"><span>Produk</span><strong>${trx.products?.name || 'Produk'}</strong></div>
+          ${trx.topping_name ? `<div class="row"><span>Topping</span><strong>${trx.topping_name}</strong></div>` : ''}
           <div class="row"><span>Qty</span><strong>${trx.quantity} pcs</strong></div>
           <div class="row"><span>Harga</span><strong>Rp ${(trx.unit_price || 0).toLocaleString('id-ID')}</strong></div>
           <div class="row"><span>Bayar</span><strong>${trx.payment_method}</strong></div>
@@ -783,7 +872,12 @@ export default function Penjualan() {
                         minute: '2-digit',
                       })}
                     </td>
-                    <td className="p-4 text-gray-900 dark:text-gray-100 font-medium whitespace-nowrap">{trx.products?.name || 'Produk Dihapus'}</td>
+                    <td className="p-4 whitespace-nowrap">
+                      <span className="font-medium text-gray-900 dark:text-gray-100">{trx.products?.name || 'Produk Dihapus'}</span>
+                      {trx.topping_name && (
+                        <span className="block text-xs text-primary-500 dark:text-primary-400 mt-0.5">+ {trx.topping_name}</span>
+                      )}
+                    </td>
                     <td className="p-4 text-right text-gray-900 dark:text-gray-100">{trx.quantity}</td>
                     <td className="p-4 text-right font-medium text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{formatRupiah(getTransactionTotal(trx))}</td>
                     <td className="p-4">
@@ -893,23 +987,53 @@ export default function Penjualan() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Pilih Produk</label>
-                <ProductPicker products={products} value={formData.product_id} onChange={(productId) => setFormData({...formData, product_id: productId})} />
-                {selectedProduct && (
-                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                    <div className="rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-500">
-                      Stok: <span className={`font-semibold ${selectedProduct.stock <= 0 ? 'text-red-500' : selectedProduct.stock <= 5 ? 'text-amber-500' : 'text-emerald-600'}`}>{selectedProduct.stock} pcs</span>
-                    </div>
-                    <div className="rounded-lg bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2 text-emerald-700 dark:text-emerald-300">
-                      Total: <span className="font-semibold">Rp {previewTotal.toLocaleString('id-ID')}</span>
-                    </div>
-                  </div>
-                )}
+                <ProductPicker
+                  products={products}
+                  value={formData.product_id}
+                  onChange={(productId) => {
+                    setFormData({ ...formData, product_id: productId, topping_name: '' });
+                    setToppingBatchStock(null);
+                    fetchProductToppingOptions(productId);
+                  }}
+                />
                 {formStockWarning && (
                   <p className="mt-2 text-xs font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 px-3 py-2 rounded-lg">
                     {formStockWarning}
                   </p>
                 )}
               </div>
+
+              {productToppingOptions.length > 0 && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                    Topping <span className="text-gray-400 font-normal text-xs">(dari catatan produksi)</span>
+                  </label>
+                  <select
+                    value={formData.topping_name}
+                    onChange={(e) => {
+                      setFormData({ ...formData, topping_name: e.target.value });
+                      fetchToppingBatchStock(formData.product_id, e.target.value);
+                    }}
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-sm focus:border-primary-500 outline-none"
+                  >
+                    <option value="">Tanpa Topping</option>
+                    {productToppingOptions.map(combo => (
+                      <option key={combo} value={combo}>{combo}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {selectedProduct && (
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-lg bg-gray-50 dark:bg-gray-800 px-3 py-2 text-gray-500">
+                    Stok: <span className={`font-semibold ${selectedProduct.stock <= 0 ? 'text-red-500' : selectedProduct.stock <= 5 ? 'text-amber-500' : 'text-emerald-600'}`}>{selectedProduct.stock} pcs</span>
+                  </div>
+                  <div className="rounded-lg bg-emerald-50 dark:bg-emerald-900/20 px-3 py-2 text-emerald-700 dark:text-emerald-300">
+                    Total: <span className="font-semibold">Rp {previewTotal.toLocaleString('id-ID')}</span>
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-4">
                 <div>

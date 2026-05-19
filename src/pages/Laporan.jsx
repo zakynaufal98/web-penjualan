@@ -13,7 +13,7 @@ const DAY_NAMES = ['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
 const MONTHS    = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
 const isMeasuredUnit = (unit) => ['kg', 'gr', 'liter', 'ml'].includes(unit);
 const getExpenseTotal = (expense) =>
-  expense.total_price || (isMeasuredUnit(expense.unit) ? (expense.unit_price || 0) : (expense.unit_price || 0) * (expense.quantity || 0));
+  isMeasuredUnit(expense.unit) ? (expense.unit_price || 0) : (expense.unit_price || 0) * (expense.quantity || 0);
 
 export default function Laporan() {
   const { bankInfo } = useStore();

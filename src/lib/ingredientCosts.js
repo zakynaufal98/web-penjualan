@@ -102,7 +102,7 @@ export const buildIngredientPriceMap = (ingredients = []) => {
 
 export const getIngredientPriceForUnit = (priceDataOrIngredient, unit) => {
   if (!priceDataOrIngredient) return 0;
-  const pricePerBase = priceDataOrIngredient.pricePerBase ?? getIngredientPricePerBase(priceDataOrIngredient);
+  const pricePerBase = priceDataOrIngredient.pricePerBase ?? priceDataOrIngredient.__pricePerBase ?? getIngredientPricePerBase(priceDataOrIngredient);
   const baseUnit = priceDataOrIngredient.baseUnit || priceDataOrIngredient.__baseUnit || getIngredientBaseUnit(priceDataOrIngredient);
   return pricePerBase * convertQuantityToBase(1, unit, baseUnit);
 };

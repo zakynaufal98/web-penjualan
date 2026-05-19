@@ -27,7 +27,7 @@ const SalesChart = lazy(() => import('../components/dashboard/SalesChart'));
 
 const isMeasuredUnit = (unit) => ['kg', 'gr', 'liter', 'ml'].includes(unit);
 const getExpenseTotal = (expense) =>
-  expense.total_price || (isMeasuredUnit(expense.unit) ? (expense.unit_price || 0) : (expense.unit_price || 0) * (expense.quantity || 0));
+  isMeasuredUnit(expense.unit) ? (expense.unit_price || 0) : (expense.unit_price || 0) * (expense.quantity || 0);
 
 const subDaysLocal = (date, days) => {
   const next = new Date(date);
